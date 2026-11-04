@@ -231,11 +231,21 @@ pub fn parse_heresphere_library(v: &Value, base: &str) -> Result<Vec<SceneGroup>
 
 /// The scan endpoint beside a HereSphere library URL (query kept).
 pub(super) fn scan_url(library: &str) -> String {
+    endpoint(library, "scan")
+}
+
+/// The sign-in endpoint beside a HereSphere library URL (query kept), where
+/// HereSphere posts the user name and password for an `auth-token`.
+pub(super) fn auth_url(library: &str) -> String {
+    endpoint(library, "auth")
+}
+
+fn endpoint(library: &str, leaf: &str) -> String {
     let (path, query) = match library.split_once('?') {
         Some((p, q)) => (p, Some(q)),
         None => (library, None),
     };
-    let mut url = format!("{}/scan", path.trim_end_matches('/'));
+    let mut url = format!("{}/{leaf}", path.trim_end_matches('/'));
     if let Some(q) = query {
         url.push('?');
         url.push_str(q);

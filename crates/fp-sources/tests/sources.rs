@@ -559,6 +559,151 @@ fn heresphere_api_gated_on_user_agent() {
     );
 }
 
+/// Sites that sign in like HereSphere: the login is posted to
+/// `<library>/auth` for an `auth-token`, sent as a header from then on; an
+/// expired token is replaced by signing in again.
+#[test]
+fn heresphere_sign_in_with_auth_token() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let sign_ins = Arc::new(AtomicUsize::new(0));
+    let first_used = Arc::new(AtomicBool::new(false));
+    let s = sign_ins.clone();
+    let server = TestServer::start(move |req| {
+        let json = |body: String| {
+            resp(
+                200,
+                body,
+                &[
+                    ("Content-Type", "application/json"),
+                    ("HereSphere-JSON-Version", "1"),
+                ],
+            )
+        };
+        let body: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+        match req.path() {
+            "/heresphere/auth" => {
+                if body["username"] != "bob" || body["password"] != "pw" {
+                    return json(r#"{"access":-1}"#.into());
+                }
+                let n = s.fetch_add(1, Ordering::SeqCst) + 1;
+                json(format!(r#"{{"auth-token":"token-{n}","access":1}}"#))
+            }
+            "/heresphere" => {
+                assert_eq!(req.header("heresphere-json-version"), Some("1"));
+                // The first token expires after one use.
+                let full = match req.header("auth-token") {
+                    Some("token-2") => true,
+                    Some("token-1") if !first_used.swap(true, Ordering::SeqCst) => true,
+                    Some(_) => return resp(401, "", &[]),
+                    None => false,
+                };
+                let list = if full {
+                    r#"["/heresphere/1","/heresphere/2"]"#
+                } else {
+                    r#"["/heresphere/1"]"#
+                };
+                json(format!(
+                    r#"{{"access":{},"library":[{{"name":"All","list":{list}}}]}}"#,
+                    if full { 1 } else { 0 }
+                ))
+            }
+            _ => resp(404, "", &[]),
+        }
+    });
+
+    // Logged in: signs in once, then the token goes with each request.
+    let src = build(&SourceConfig::HereSphere(feed(
+        server.url("/heresphere"),
+        Some(Credentials::new("bob", "pw")),
+        None,
+    )))
+    .unwrap();
+    let groups = src.list(None).unwrap();
+    assert_eq!(names(&groups), ["All"]);
+    let scenes = src.list(Some(&groups[0].location)).unwrap();
+    assert_eq!(scenes.len(), 2, "the signed-in library");
+    // The first token expired on its second use: signed in again (token-2)
+    // and the request repeated.
+    let auths = server
+        .requests()
+        .iter()
+        .filter(|r| r.path() == "/heresphere/auth")
+        .count();
+    assert_eq!(auths, 2);
+    assert_eq!(sign_ins.load(Ordering::SeqCst), 2);
+
+    // Without a login there is no sign-in: the free library.
+    let anonymous = build(&SourceConfig::HereSphere(feed(
+        server.url("/heresphere"),
+        None,
+        None,
+    )))
+    .unwrap();
+    let groups = anonymous.list(None).unwrap();
+    let scenes = anonymous.list(Some(&groups[0].location)).unwrap();
+    assert_eq!(scenes.len(), 1);
+
+    // A wrong password is reported as such.
+    let wrong = build(&SourceConfig::HereSphere(feed(
+        server.url("/heresphere"),
+        Some(Credentials::new("bob", "nope")),
+        None,
+    )))
+    .unwrap();
+    assert!(matches!(wrong.list(None), Err(Error::Auth(_))));
+}
+
+/// A HereSphere server without HereSphere's sign-in keeps working with the
+/// login in each request's body, as before: one without `/auth` (404), and
+/// one like XBVR, which takes `auth` for a scene ID, checks the login in
+/// the body and answers an unknown scene with an empty body.
+#[test]
+fn heresphere_login_without_sign_in_endpoint() {
+    for xbvr in [false, true] {
+        let server = TestServer::start(move |req| {
+            let body: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+            if body["password"] != "pw" {
+                return resp(
+                    200,
+                    r#"{"access":-1,"library":[{"name":"Login Failed"}]}"#,
+                    &[("Content-Type", "application/json")],
+                );
+            }
+            match req.path() {
+                "/heresphere" => resp(
+                    200,
+                    r#"{"access":1,"library":[{"name":"All","list":["/heresphere/1"]}]}"#,
+                    &[("Content-Type", "application/json")],
+                ),
+                "/heresphere/auth" if xbvr => resp(200, "", &[]),
+                _ => resp(404, "", &[]),
+            }
+        });
+        let source = |password: &str| {
+            build(&SourceConfig::HereSphere(feed(
+                server.url("/heresphere"),
+                Some(Credentials::new("bob", password)),
+                None,
+            )))
+            .unwrap()
+        };
+        let src = source("pw");
+        assert_eq!(names(&src.list(None).unwrap()), ["All"], "xbvr={xbvr}");
+        src.list(None).unwrap();
+        let auths = server
+            .requests()
+            .iter()
+            .filter(|r| r.path() == "/heresphere/auth")
+            .count();
+        assert_eq!(auths, 1, "asked once, then remembered there is none");
+        // A wrong password is still reported as one.
+        assert!(
+            matches!(source("nope").list(None), Err(Error::Auth(_))),
+            "xbvr={xbvr}"
+        );
+    }
+}
+
 #[test]
 fn heresphere_library_details_and_open() {
     let base: Arc<std::sync::OnceLock<String>> = Arc::default();

@@ -166,7 +166,7 @@ that pairing, you can also delete `~/.ssh/id_rsa_frame_devkit` and
 | Where | How |
 |---|---|
 | Any folder on the headset, a microSD card or a USB drive | Browse it under Home › On this device, or make it a library: Sources › Add source › Library |
-| Any server with a DeoVR feed or HereSphere API | Sources › Add source › DeoVR or HereSphere |
+| Any server with a DeoVR feed or HereSphere API | Sources › Add source › DeoVR or HereSphere, with the site's user name and password if it has a login (a HereSphere API that signs in as HereSphere does, at its `/auth` address, is signed in to once and its token sent from then on) |
 | NAS / Windows share | Sources › Add source › SMB share: a whole server (`smb://nas/`, which lists the shares your login, or a guest without one, may open) or one share or folder (`smb://nas/videos`) |
 | Any computer with SSH (Linux, macOS, many NAS) | Sources › Add source › SFTP (see [Connecting over SFTP](#connecting-over-sftp)) |
 | Nextcloud and other WebDAV | Sources › Add source › WebDAV |
