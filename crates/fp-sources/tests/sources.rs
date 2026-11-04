@@ -524,6 +524,41 @@ fn logins_stay_with_the_feeds_server() {
 
 // ---------------------------------------------------------------- HereSphere
 
+/// Some sites answer their HereSphere API only to a client that names
+/// itself HereSphere and send anything else to a setup page.
+#[test]
+fn heresphere_api_gated_on_user_agent() {
+    let server = TestServer::start(|req| {
+        let agent = req.header("user-agent").unwrap_or("");
+        if !agent.contains("HereSphere/") {
+            return resp(302, "", &[("Location", "/how-to")]);
+        }
+        match (req.method.as_str(), req.path()) {
+            ("POST", "/heresphere") => resp(
+                200,
+                r#"{"access":1,"library":[{"name":"All","list":["/heresphere/1"]}]}"#,
+                &[
+                    ("Content-Type", "application/json"),
+                    ("HereSphere-JSON-Version", "1"),
+                ],
+            ),
+            _ => resp(404, "", &[]),
+        }
+    });
+    let src = build(&SourceConfig::HereSphere(feed(
+        server.url("/heresphere"),
+        None,
+        None,
+    )))
+    .unwrap();
+    let groups = src.list(None).unwrap();
+    assert_eq!(names(&groups), ["All"]);
+    assert_eq!(
+        server.requests()[0].header("user-agent"),
+        Some("HereSphere/0.8")
+    );
+}
+
 #[test]
 fn heresphere_library_details_and_open() {
     let base: Arc<std::sync::OnceLock<String>> = Arc::default();

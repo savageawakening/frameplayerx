@@ -55,6 +55,12 @@ const LINKS_FRESH: Duration = Duration::from_secs(60);
 /// Parallel requests when a HereSphere group is listed.
 const DETAIL_WORKERS: usize = 6;
 
+/// The `User-Agent` HereSphere 0.8 sends with its API requests. Some
+/// commercial sites answer their HereSphere API only to a client that names
+/// itself HereSphere (`Vary: User-Agent`) and redirect everything else to a
+/// setup page, so HereSphere API sources send it.
+const HERESPHERE_USER_AGENT: &str = "HereSphere/0.8";
+
 // ---- fields both formats use ----
 
 fn url_field(v: &Value, key: &str, base: &str) -> Option<String> {
@@ -256,10 +262,16 @@ impl FeedSource {
             ));
         }
         let (url, creds) = clean_url_and_credentials(&config.url, config.credentials.as_ref())?;
+        let defaults = HttpOptions::default();
+        let user_agent = match protocol {
+            Protocol::HereSphere => HERESPHERE_USER_AGENT.to_string(),
+            Protocol::DeoVr => defaults.user_agent.clone(),
+        };
         let opts = HttpOptions {
             insecure_tls: config.insecure_tls,
             cache: crate::cache::CacheOptions::for_downloads(config.parallel_downloads),
-            ..HttpOptions::default()
+            user_agent,
+            ..defaults
         };
         Ok(FeedSource {
             protocol,
