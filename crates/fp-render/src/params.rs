@@ -362,6 +362,7 @@ pub(crate) fn off_centre(d: Vec3, p: Vec3, r: f32) -> Vec3 {
 }
 
 /// Mirrors `softly_inside` in shaders/scene.wgsl.
+#[cfg(test)]
 pub(crate) fn softly_inside(p: Vec3, r: f32) -> Vec3 {
     let len = p.length();
     let limit = 0.9 * r;
