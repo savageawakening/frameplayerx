@@ -1503,9 +1503,29 @@ impl Renderer {
         self.stamp(Mark::EyesDone);
         if let Ok(Some(m)) = r {
             self.measure(m);
+            self.after_measuring();
             self.stamp(Mark::MeasureDone);
         }
         r.map(|_| ())
+    }
+
+    /// Orders the measuring passes' reads of the frame before what waits on
+    /// the eye passes': the decoder's buffers go back to it after those
+    /// (`end_frame`), and must not while a compute pass still reads them.
+    fn after_measuring(&self) {
+        let cmd = self.slots[self.current].cmd;
+        mem::memory_barrier(
+            &self.gpu,
+            cmd,
+            (
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::SHADER_SAMPLED_READ,
+            ),
+            (
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                vk::AccessFlags2::SHADER_SAMPLED_READ,
+            ),
+        );
     }
 
     /// Records the measurement `draw_eyes` found it could make.

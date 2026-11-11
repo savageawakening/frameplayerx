@@ -112,6 +112,14 @@ pub struct Focus {
 /// The nearest the picture is drawn, metres: nearer, the sphere is smaller
 /// than the viewer's eyes can be kept well inside.
 pub const MIN_FOCUS_DISTANCE: f32 = 0.1;
+/// The farthest, metres: beyond, it's as good as infinity, and the shader's
+/// squares stay well within single precision.
+const MAX_FOCUS_DISTANCE: f32 = 1e4;
+/// The widest the cameras are taken to be apart, metres.
+const MAX_BASELINE: f32 = 0.5;
+/// The farthest an eye is taken to be from the middle of the head, metres:
+/// eye poses past it are a tracking glitch.
+const MAX_EYE_OFFSET: f32 = 0.1;
 
 impl Default for VideoParams {
     fn default() -> Self {
@@ -308,10 +316,12 @@ pub(crate) fn build(
         hdr: hdr_levels(crate::hdr::DEFAULT_PEAK),
         tp10: Vec4::ZERO,
         tp10_uv: Vec4::ZERO,
+        // Never a value the shader can't use: an unknown distance or
+        // separation draws as without autofocus rather than as nothing.
         focus: match video.focus {
-            Some(f) if kind != 0 => Vec4::new(
-                f.distance.max(MIN_FOCUS_DISTANCE),
-                f.baseline.max(0.0),
+            Some(f) if kind != 0 && f.distance.is_finite() && f.baseline.is_finite() => Vec4::new(
+                f.distance.clamp(MIN_FOCUS_DISTANCE, MAX_FOCUS_DISTANCE),
+                f.baseline.clamp(0.0, MAX_BASELINE),
                 0.0,
                 0.0,
             ),
@@ -325,7 +335,14 @@ pub(crate) fn build(
 /// positions, in the room frame of `anchor`: what autofocus draws from.
 pub(crate) fn place_eyes(p: &mut SceneParams, anchor: Quat, eyes: [Vec3; 2]) {
     let middle = 0.5 * (eyes[0] + eyes[1]);
-    p.eyes = eyes.map(|e| (anchor.inverse() * (e - middle)).extend(0.0));
+    p.eyes = eyes.map(|e| {
+        let offset = anchor.inverse() * (e - middle);
+        if offset.is_finite() {
+            offset.clamp_length_max(MAX_EYE_OFFSET).extend(0.0)
+        } else {
+            Vec4::ZERO
+        }
+    });
 }
 
 /// The world-space position of the eye a view is from.
@@ -662,6 +679,55 @@ mod tests {
             Quat::IDENTITY,
         );
         assert_eq!(p.focus.x, MIN_FOCUS_DISTANCE);
+    }
+
+    #[test]
+    fn nothing_the_shader_cant_use_reaches_it() {
+        for (distance, baseline) in [
+            (f32::NAN, 0.064),
+            (f32::INFINITY, 0.064),
+            (0.5, f32::NAN),
+            (-1.0, 0.064),
+        ] {
+            let p = focused_params(
+                Some(Focus { distance, baseline }),
+                0.064,
+                0.0,
+                Quat::IDENTITY,
+            );
+            assert!(p.focus.is_finite(), "{distance} {baseline}: {}", p.focus);
+            for ray in [Vec3::NEG_Z, Vec3::new(0.7, 0.2, -0.3).normalize()] {
+                for eye in 0..2 {
+                    let d = video_dir(&p, ray, eye);
+                    assert!(d.is_finite() && (d.length() - 1.0).abs() < 1e-4, "{d}");
+                }
+            }
+        }
+        // Eye poses gone wrong: offsets kept to something an eye can be.
+        let mut p = focused_params(
+            Some(Focus {
+                distance: 0.1,
+                baseline: 0.064,
+            }),
+            0.064,
+            0.0,
+            Quat::IDENTITY,
+        );
+        place_eyes(
+            &mut p,
+            Quat::IDENTITY,
+            [Vec3::new(f32::NAN, 0.0, 0.0), Vec3::ZERO],
+        );
+        assert!(p.eyes.iter().all(|e| e.is_finite()));
+        place_eyes(
+            &mut p,
+            Quat::IDENTITY,
+            [Vec3::new(-50.0, 0.0, 0.0), Vec3::new(50.0, 0.0, 0.0)],
+        );
+        assert!(p.eyes.iter().all(|e| e.length() <= MAX_EYE_OFFSET + 1e-6));
+        for eye in 0..2 {
+            assert!(video_dir(&p, Vec3::X, eye).is_finite());
+        }
     }
 
     #[test]

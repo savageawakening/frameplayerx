@@ -1038,3 +1038,62 @@ fn autofocus_shows_a_point_at_the_focus_distance_where_it_really_is() {
     assert!(off == on, "the same picture, pixel for pixel");
     e.destroy(&r);
 }
+
+/// What drawing at a focus costs the eye passes: not a limit but a report,
+/// `cargo test --release --test scene focus_cost -- --nocapture`.
+#[test]
+fn focus_cost_is_reported() {
+    let Some((mut r, mut e)) = setup() else {
+        return;
+    };
+    e.destroy(&r);
+    // About the Frame's eye size.
+    let mut e = OffscreenEyes::new(&r, 2160, 2160).expect("eyes");
+    let f = frame(4096, 2048, |u, v| {
+        let g = ((u * 731.0).sin() * (v * 557.0).cos() * 127.0 + 128.0) as u8;
+        [g, g, g]
+    });
+    let p = |focus| VideoParams {
+        focus,
+        ..params(
+            Projection::EQUIRECT_180,
+            StereoLayout::SideBySide,
+            ViewSettings::default(),
+        )
+    };
+    let on = p(Some(fp_render::Focus {
+        distance: 0.5,
+        baseline: 0.07,
+    }));
+    let off = p(None);
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    for i in 0..80 {
+        let which = if i % 2 == 0 { &off } else { &on };
+        r.begin_frame().unwrap();
+        r.set_video(Some(&f)).unwrap();
+        r.draw(&e.targets(), &eyes_at(1.6), which, &[]).unwrap();
+        r.end_frame().unwrap();
+        // The frame two back, as the slots come round.
+        if let Some(ms) = r.gpu_times().and_then(|t| t.eyes)
+            && i >= 4
+        {
+            if i % 2 == 0 { &mut a } else { &mut b }.push(ms);
+        }
+    }
+    if a.is_empty() || b.is_empty() {
+        eprintln!("skipping: frames aren't timed here");
+        e.destroy(&r);
+        return;
+    }
+    let median = |v: &mut Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    let (off_ms, on_ms) = (median(&mut a), median(&mut b));
+    println!(
+        "eye passes at 2160x2160 each: without focus {off_ms:.3} ms, with {on_ms:.3} ms \
+         ({:+.1}%)",
+        100.0 * (on_ms / off_ms - 1.0)
+    );
+    e.destroy(&r);
+}

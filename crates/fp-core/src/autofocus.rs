@@ -424,6 +424,9 @@ impl Reading {
 /// that over the cosine of the latitude. None of this depends on the
 /// separation, so it holds whatever the baseline is set to.
 pub fn frontal_angle(disparity: f32, place: [f32; 2]) -> f32 {
+    if !(disparity.is_finite() && place[0].is_finite() && place[1].is_finite()) {
+        return f32::NAN;
+    }
     let (lon, lat) = (place[0].to_radians(), place[1].to_radians());
     let half = (0.5 * disparity.to_radians()).tan() * lat.cos() / lon.cos().max(MIN_COS);
     2.0 * half.atan().to_degrees()
@@ -822,6 +825,9 @@ impl Autofocus {
 
     /// One more trusted depth.
     fn vote(&mut self, angle: f32) {
+        if !angle.is_finite() {
+            return;
+        }
         self.votes[self.voted % VOTES] = angle;
         self.voted += 1;
         // A focus can't be held for long against readings it's trusting: they
@@ -893,6 +899,9 @@ impl Autofocus {
         let t = self.tuning;
         let nearest = angle(MIN_DISTANCE, t.baseline);
         let target = self.focus.map_or(0.0, |a| a.clamp(0.0, nearest));
+        if !(self.shown.value.is_finite() && self.shown.speed.is_finite()) {
+            self.shown = Easing::default();
+        }
         let shown = self.shown.step(target, dt, t.rate, t.acceleration);
         (shown > 1e-4).then(|| distance(shown, t.baseline).max(MIN_DISTANCE))
     }
@@ -1344,6 +1353,21 @@ mod tests {
         a.measured(&on_gaze(reading(3.0)));
         assert_eq!(a.focus_distance(), None);
         assert_eq!(a.take_stats().clears, 1);
+    }
+
+    #[test]
+    fn nothing_unknown_moves_the_focus() {
+        let mut a = Autofocus::default();
+        let mut r = on_gaze(reading(6.0));
+        r.place = [f32::NAN, 0.0];
+        for _ in 0..AGREEING {
+            a.measured(&r);
+        }
+        assert_eq!(a.focus_distance(), None);
+        a.shown.value = f32::NAN;
+        assert_eq!(a.advance(1.0 / 90.0), None);
+        agree(&mut a, 8.0);
+        assert!(settle(&mut a).is_some_and(f32::is_finite));
     }
 
     #[test]

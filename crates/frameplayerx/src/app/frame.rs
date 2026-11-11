@@ -840,8 +840,16 @@ fn autofocus(
     reading: Option<fp_core::autofocus::Reading>,
 ) {
     let af = &mut p.autofocus;
-    let measurable = frame
-        .is_some_and(|f| fp_render::disparity::measurable(&video.format, video.rotation, f.layout));
+    // A frame missing for a moment (a stall, a seek) keeps the last verdict:
+    // switching off and on again would snap the picture back and ease it in.
+    let measurable = match frame {
+        Some(f) => {
+            let m = fp_render::disparity::measurable(&video.format, video.rotation, f.layout);
+            p.autofocus_measurable = m;
+            m
+        }
+        None => p.autofocus_measurable,
+    };
     if !on || !measurable {
         af.off();
         p.autofocus_at = None;
@@ -860,7 +868,7 @@ fn autofocus(
     if let Some(r) = reading {
         af.measured(&r);
     }
-    if af.due() {
+    if af.due() && frame.is_some() {
         let ahead = input.gaze.or(input.head.map(|(_, rot)| rot * Vec3::NEG_Z));
         match (settled, ahead) {
             (true, Some(ahead)) => {

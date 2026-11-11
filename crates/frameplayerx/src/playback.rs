@@ -102,6 +102,9 @@ pub struct Playback {
     /// The time of the frame autofocus last saw, to forget its readings on
     /// a seek.
     pub autofocus_at: Option<f64>,
+    /// Whether the last frame seen could be measured: kept while a frame is
+    /// missing for a moment, so that a stall doesn't switch it off and on.
+    pub autofocus_measurable: bool,
     /// Adjustments differ from what is saved for this video.
     pub settings_dirty: bool,
     /// What is saved for this video (the Passthrough tab saves its part
@@ -715,6 +718,7 @@ pub fn open(
             keyframes,
             autofocus: Autofocus::default(),
             autofocus_at: None,
+            autofocus_measurable: false,
             settings_dirty: false,
             heatmap,
             markers,
