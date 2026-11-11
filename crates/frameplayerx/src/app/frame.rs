@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn the_gaze_on_a_panel_that_shows_is_on_the_ui() {
-        let mut p = Panel::new([100, 100], glam::Vec2::new(0.5, 0.5), 1.0);
+        let mut p = Panel::new([100, 100], Vec2::new(0.5, 0.5), 1.0);
         p.pose = Mat4::from_translation(Vec3::new(0.0, 1.6, -1.0));
         let at = Vec3::new(0.0, 1.6, 0.0);
         assert!(!gaze_hits([&p].into_iter(), at, Vec3::NEG_Z), "hidden");
