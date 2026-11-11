@@ -469,6 +469,10 @@ fn run_xr(args: &Args) -> Result<(), Error> {
     // over ~9 ms the compositor starts synthesising frames.
     let mut frame_ms: Vec<f32> = Vec::new();
     let mut gpu_ms = perf::GpuWindow::default();
+    match perf::gpu_clock_setup() {
+        Some(line) => log::info!("{line}"),
+        None => log::info!("GPU clock: no devfreq node for the GPU"),
+    }
     let mut last_frame_ms = None;
     let mut timing_since = Instant::now();
     // The refresh rate, resolution and foveation in use.

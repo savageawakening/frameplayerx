@@ -441,9 +441,17 @@ fn meminfo(text: &str) -> Option<(u64, u64)> {
 
 /// A DRM client's id and its GPU time over all engines (ns), from the
 /// fdinfo of a file open on a /dev/dri node.
+#[cfg(test)]
 fn drm_engine_time(fdinfo: &str) -> Option<(u64, u64)> {
+    drm_usage(fdinfo).map(|(id, ns, _)| (id, ns))
+}
+
+/// A DRM client's id, GPU time (ns) and GPU cycles over all engines; the
+/// cycles are 0 where the driver doesn't count them.
+fn drm_usage(fdinfo: &str) -> Option<(u64, u64, u64)> {
     let mut id = None;
     let mut ns = None;
+    let mut cycles = 0;
     for line in fdinfo.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
@@ -457,16 +465,25 @@ fn drm_engine_time(fdinfo: &str) -> Option<(u64, u64)> {
                 .and_then(|n| n.parse::<u64>().ok())
         {
             *ns.get_or_insert(0) += n;
+        } else if key.starts_with("drm-cycles-")
+            && let Ok(n) = value.parse::<u64>()
+        {
+            cycles += n;
         }
     }
-    Some((id?, ns?))
+    Some((id?, ns?, cycles))
 }
 
 /// This process's GPU time over all its DRM clients (ns): each open
 /// /dev/dri file reports its client's, and several files can share one.
 fn gpu_time() -> Option<u64> {
+    gpu_usage().map(|(ns, _)| ns)
+}
+
+/// This process's GPU time (ns) and cycles, as [`gpu_time`].
+fn gpu_usage() -> Option<(u64, u64)> {
     let mut seen = Vec::new();
-    let mut total = None;
+    let mut total: Option<(u64, u64)> = None;
     for entry in std::fs::read_dir("/proc/self/fd").ok()?.flatten() {
         let on_dri =
             std::fs::read_link(entry.path()).is_ok_and(|target| target.starts_with("/dev/dri/"));
@@ -477,17 +494,18 @@ fn gpu_time() -> Option<u64> {
             "/proc/self/fdinfo/{}",
             entry.file_name().to_string_lossy()
         ));
-        if let Some((id, ns)) = info.ok().as_deref().and_then(drm_engine_time)
+        if let Some((id, ns, cycles)) = info.ok().as_deref().and_then(drm_usage)
             && !seen.contains(&id)
         {
             seen.push(id);
-            *total.get_or_insert(0) += ns;
+            let t = total.get_or_insert((0, 0));
+            t.0 += ns;
+            t.1 += cycles;
         }
     }
     total
 }
 
-/// The GPU's clock (MHz) from its devfreq node, the one named for a GPU.
 /// One part of a frame's GPU time.
 type Part = fn(&fp_render::GpuTimes) -> Option<f32>;
 
@@ -496,6 +514,9 @@ type Part = fn(&fp_render::GpuTimes) -> Option<f32>;
 #[derive(Default)]
 pub struct GpuWindow {
     frames: Vec<fp_render::GpuTimes>,
+    /// The clock and the GPU's use at the last line, to tell what changed.
+    clock: Option<Clock>,
+    heat: Option<HeatFiles>,
 }
 
 impl GpuWindow {
@@ -539,21 +560,137 @@ impl GpuWindow {
             })
             .collect();
         line += &format!("; medians {}", medians.join(", "));
-        if let Some(mhz) = gpu_clock() {
-            line += &format!("; GPU at {mhz} MHz");
+        let now = Clock::read();
+        line += &now.describe(self.clock.as_ref());
+        self.clock = Some(now);
+        let heat = self.heat.get_or_insert_with(HeatFiles::find);
+        let (temp, held) = heat.read(Chip::Gpu);
+        if let Some(t) = temp {
+            line += &format!(", {t:.0}°C");
+        }
+        if held {
+            line += ", slowed for heat";
         }
         Some(line)
     }
 }
 
-fn gpu_clock() -> Option<u32> {
+/// The GPU's devfreq node, the one named for a GPU (`3d00000.gpu` on a
+/// Steam Frame).
+fn gpu_devfreq() -> Option<PathBuf> {
     std::fs::read_dir("/sys/class/devfreq")
         .ok()?
         .flatten()
         .find(|e| e.file_name().to_string_lossy().contains("gpu"))
-        .and_then(|e| std::fs::read_to_string(e.path().join("cur_freq")).ok())
-        .and_then(|hz| hz.trim().parse::<u64>().ok())
-        .map(|hz| (hz / 1_000_000) as u32)
+        .map(|e| e.path())
+}
+
+/// A devfreq file in Hz, as MHz.
+fn devfreq_mhz(dir: &std::path::Path, file: &str) -> Option<u32> {
+    let hz: u64 = std::fs::read_to_string(dir.join(file))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some((hz / 1_000_000) as u32)
+}
+
+/// The clock changes devfreq has made, from the end of its `trans_stat`.
+fn transitions(trans_stat: &str) -> Option<u64> {
+    trans_stat
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Total transition"))
+        .and_then(|rest| rest.trim_start_matches([' ', ':']).trim().parse().ok())
+}
+
+fn gpu_clock() -> Option<u32> {
+    devfreq_mhz(&gpu_devfreq()?, "cur_freq")
+}
+
+/// How the GPU's clock is run, for the log once at start: devfreq's governor,
+/// its range and the clocks it may pick. `None` where there's no devfreq.
+pub fn gpu_clock_setup() -> Option<String> {
+    let dir = gpu_devfreq()?;
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok();
+    let governor = read("governor").map_or("unknown".into(), |g| g.trim().to_string());
+    let available: Vec<String> = read("available_frequencies")
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|hz| hz.parse::<u64>().ok())
+        .map(|hz| (hz / 1_000_000).to_string())
+        .collect();
+    Some(format!(
+        "GPU clock {}: governor {governor}, {}–{} MHz, now {} MHz, may pick {} MHz; clock changes so far {}",
+        dir.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        devfreq_mhz(&dir, "min_freq").map_or("?".into(), |m| m.to_string()),
+        devfreq_mhz(&dir, "max_freq").map_or("?".into(), |m| m.to_string()),
+        devfreq_mhz(&dir, "cur_freq").map_or("?".into(), |m| m.to_string()),
+        if available.is_empty() {
+            "?".into()
+        } else {
+            available.join(", ")
+        },
+        read("trans_stat")
+            .as_deref()
+            .and_then(transitions)
+            .map_or("unreadable".into(), |n| n.to_string()),
+    ))
+}
+
+/// The GPU's clock as devfreq has it, and this process's GPU time and cycles,
+/// at one moment.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Clock {
+    mhz: Option<u32>,
+    max_mhz: Option<u32>,
+    transitions: Option<u64>,
+    /// GPU time (ns) and cycles.
+    usage: Option<(u64, u64)>,
+}
+
+impl Clock {
+    fn read() -> Clock {
+        let dir = gpu_devfreq();
+        let dir = dir.as_deref();
+        Clock {
+            mhz: dir.and_then(|d| devfreq_mhz(d, "cur_freq")),
+            max_mhz: dir.and_then(|d| devfreq_mhz(d, "max_freq")),
+            transitions: dir
+                .and_then(|d| std::fs::read_to_string(d.join("trans_stat")).ok())
+                .as_deref()
+                .and_then(transitions),
+            usage: gpu_usage(),
+        }
+    }
+
+    /// For the GPU line: the clock devfreq says, its cap, how often it
+    /// changed since `before`, and the clock the GPU really ran at while
+    /// busy (cycles over time) where the driver counts cycles. devfreq's
+    /// number is only what was last asked for: a clock lowered beneath it
+    /// (by the GPU's own management, for heat) shows only in the cycles.
+    fn describe(&self, before: Option<&Clock>) -> String {
+        let Some(mhz) = self.mhz else {
+            return String::new();
+        };
+        let mut s = format!("; GPU at {mhz} MHz");
+        if let Some(max) = self.max_mhz {
+            s += &format!(" (cap {max})");
+        }
+        if let (Some(now), Some(then)) = (self.transitions, before.and_then(|b| b.transitions)) {
+            s += &format!(", {} clock changes", now.saturating_sub(then));
+        }
+        if let (Some((ns, cycles)), Some((ns0, cycles0))) =
+            (self.usage, before.and_then(|b| b.usage))
+        {
+            let (ns, cycles) = (ns.saturating_sub(ns0), cycles.saturating_sub(cycles0));
+            if ns > 1_000_000 && cycles > 0 {
+                s += &format!(", {:.0} MHz while busy", cycles as f64 * 1e3 / ns as f64);
+            }
+        }
+        s
+    }
 }
 
 #[cfg(test)]
@@ -615,6 +752,47 @@ mod tests {
         assert_eq!(cpu_times("garbage"), None);
         assert_eq!(millidegrees("38100\n"), Some(38.1));
         assert_eq!(millidegrees("n/a"), None);
+    }
+
+    #[test]
+    fn the_gpu_clock_line_says_what_changed_and_what_really_ran() {
+        assert_eq!(
+            transitions("     From  :   To\n  ...\nTotal transition : 1234\n"),
+            Some(1234)
+        );
+        assert_eq!(transitions("garbage"), None);
+        assert_eq!(
+            drm_usage("drm-client-id:\t7\ndrm-engine-gpu:\t2000000 ns\ndrm-cycles-gpu:\t900000\n"),
+            Some((7, 2_000_000, 900_000))
+        );
+        let before = Clock {
+            mhz: Some(903),
+            max_mhz: Some(903),
+            transitions: Some(10),
+            usage: Some((1_000_000_000, 500_000_000)),
+        };
+        let now = Clock {
+            transitions: Some(10),
+            // 1 s busy for 450 M cycles: 450 MHz, under what devfreq says.
+            usage: Some((2_000_000_000, 950_000_000)),
+            ..before
+        };
+        assert_eq!(
+            now.describe(Some(&before)),
+            "; GPU at 903 MHz (cap 903), 0 clock changes, 450 MHz while busy"
+        );
+        assert_eq!(now.describe(None), "; GPU at 903 MHz (cap 903)");
+        // No cycles counted: nothing made up.
+        let blind = Clock {
+            usage: Some((2_000_000_000, 0)),
+            ..now
+        };
+        let before_blind = Clock {
+            usage: Some((1_000_000_000, 0)),
+            ..before
+        };
+        assert!(!blind.describe(Some(&before_blind)).contains("busy"));
+        assert_eq!(Clock::default().describe(None), "");
     }
 
     #[test]
