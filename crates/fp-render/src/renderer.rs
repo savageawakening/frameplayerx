@@ -163,6 +163,9 @@ struct Slot {
     garbage_buffers: Vec<Buffer>,
 }
 
+/// What `draw_eyes` found the frame can measure: autofocus's patch.
+type EyesDrawn = Option<(crate::patch::Strips, crate::patch::Drawn)>;
+
 pub struct Renderer {
     gpu: Arc<Gpu>,
     color_format: vk::Format,
@@ -201,11 +204,10 @@ pub struct Renderer {
     hdr_peak: PeakDetector,
     /// Times each frame's parts on the GPU, where it has timestamps.
     timer: Option<FrameTimer>,
-    /// Autofocus measuring frames in planes; 10-bit pictures sampled in
-    /// place are measured by `tp10_eyes`.
-    disparity: Option<crate::disparity::Disparity>,
-    /// The last measurement to finish that nothing has asked for yet.
-    reading: Option<fp_core::autofocus::Reading>,
+    /// Autofocus's patches of frames in planes (10-bit pictures sampled in
+    /// place are drawn by `tp10_eyes`), and the last one drawn.
+    patcher: Option<crate::patch::Patcher>,
+    patch: Option<crate::patch::PatchResult>,
     /// The parts of the last frame the GPU finished.
     gpu_times: Option<GpuTimes>,
     /// Decoder buffers imported to be read in place.
@@ -420,8 +422,8 @@ impl Renderer {
                     .ok(),
                 hdr_peak: PeakDetector::default(),
                 timer: FrameTimer::new(&gpu, SLOTS),
-                disparity: crate::disparity::Disparity::new(&gpu, scene_layout, SLOTS),
-                reading: None,
+                patcher: crate::patch::Patcher::new(&gpu, scene_layout, SLOTS),
+                patch: None,
                 gpu_times: None,
                 imports: Default::default(),
                 shared_set: None,
@@ -776,27 +778,24 @@ impl Renderer {
     /// finished.
     fn take_reading(&mut self) {
         let slot = self.current;
-        let Some(d) = self.disparity.as_mut() else {
-            return;
-        };
-        let Some(p) = d.pending[slot].take() else {
-            return;
-        };
-        let bytes = if p.tp10 {
-            match self.tp10_eyes.as_ref().and_then(|t| t.result(slot)) {
-                Some(b) => b,
-                None => return,
+        if let Some(pt) = self.patcher.as_mut()
+            && let Some(d) = pt.drawn[slot].take()
+        {
+            let bytes = if d.tp10 {
+                self.tp10_eyes.as_ref().and_then(|t| t.patch_result(slot))
+            } else {
+                Some(pt.result(slot))
+            };
+            if let Some(b) = bytes {
+                self.patch = Some(crate::patch::result(b, &d));
             }
-        } else {
-            d.result(slot)
-        };
-        self.reading = Some(crate::disparity::reading(bytes, p.place, p.vertical, p.tag));
+        }
     }
 
-    /// The newest stereo disparity measurement that
-    /// [`VideoParams::measure`] asked for, once, a frame or two later.
-    pub fn disparity_reading(&mut self) -> Option<fp_core::autofocus::Reading> {
-        self.reading.take()
+    /// The newest epipolar patch that [`VideoParams::patch`] asked for, once,
+    /// a frame or two later.
+    pub fn patch_result(&mut self) -> Option<crate::patch::PatchResult> {
+        self.patch.take()
     }
 
     /// The parts of the last frame the GPU finished, two frames back.
@@ -1501,12 +1500,34 @@ impl Renderer {
         self.stamp(Mark::Eyes);
         let r = self.draw_eyes(targets, eyes, video, quads);
         self.stamp(Mark::EyesDone);
-        if let Ok(Some(m)) = r {
-            self.measure(m);
+        if let Some(p) = r? {
+            self.draw_patch(p);
             self.after_measuring();
-            self.stamp(Mark::MeasureDone);
+            self.stamp(Mark::PatchDone);
         }
-        r.map(|_| ())
+        Ok(())
+    }
+
+    /// Records the epipolar patch `draw_eyes` found it could draw.
+    fn draw_patch(&mut self, (s, drawn): (crate::patch::Strips, crate::patch::Drawn)) {
+        let slot_idx = self.current;
+        let (gpu, cmd) = (&self.gpu, self.slots[slot_idx].cmd);
+        let done = if drawn.tp10 {
+            self.tp10_eyes
+                .as_ref()
+                .is_some_and(|t| t.patch(gpu, cmd, slot_idx, &s))
+        } else {
+            match self.patcher.as_mut() {
+                Some(p) => {
+                    p.record(gpu, cmd, slot_idx, self.slots[slot_idx].scene_set, &s);
+                    true
+                }
+                None => false,
+            }
+        };
+        if done && let Some(p) = self.patcher.as_mut() {
+            p.drawn[slot_idx] = Some(drawn);
+        }
     }
 
     /// Orders the measuring passes' reads of the frame before what waits on
@@ -1528,35 +1549,13 @@ impl Renderer {
         );
     }
 
-    /// Records the measurement `draw_eyes` found it could make.
-    fn measure(&mut self, (w, pending): (crate::disparity::Window, crate::disparity::Pending)) {
-        let slot_idx = self.current;
-        let (gpu, cmd) = (&self.gpu, self.slots[slot_idx].cmd);
-        let done = if pending.tp10 {
-            self.tp10_eyes
-                .as_ref()
-                .is_some_and(|t| t.measure(gpu, cmd, slot_idx, &w))
-        } else {
-            match self.disparity.as_mut() {
-                Some(d) => {
-                    d.record(gpu, cmd, slot_idx, self.slots[slot_idx].scene_set, &w);
-                    true
-                }
-                None => false,
-            }
-        };
-        if done && let Some(d) = self.disparity.as_mut() {
-            d.pending[slot_idx] = Some(pending);
-        }
-    }
-
     fn draw_eyes(
         &mut self,
         targets: &[EyeTarget; 2],
         eyes: &[EyeView; 2],
         video: &VideoParams,
         quads: &[QuadDraw],
-    ) -> Result<Option<(crate::disparity::Window, crate::disparity::Pending)>> {
+    ) -> Result<EyesDrawn> {
         self.update_scene_set();
         let inv = [
             (eyes[0].proj * eyes[0].view).inverse(),
@@ -1583,7 +1582,7 @@ impl Renderer {
             _ => None,
         }
         .is_some();
-        let measure = self.measurement(video, &p, frame_desc.as_ref(), tp10);
+        let patch = self.patch_placement(video, &p, frame_desc.as_ref(), tp10);
         // Quad vertices: two triangles per quad.
         let mut verts: Vec<QuadVertex> = Vec::with_capacity(quads.len() * 6);
         let mut sets = Vec::with_capacity(quads.len());
@@ -1768,37 +1767,29 @@ impl Renderer {
                 );
             }
         }
-        Ok(measure)
+        Ok(patch)
     }
 
-    /// What [`VideoParams::measure`] asks to measure, where this frame can be:
-    /// the window, and what to note for reading it back.
-    fn measurement(
+    /// Where [`VideoParams::patch`] asks to draw, where this frame can be.
+    fn patch_placement(
         &self,
         video: &VideoParams,
         p: &SceneParams,
         frame: Option<&params::FrameDesc>,
         tp10: bool,
-    ) -> Option<(crate::disparity::Window, crate::disparity::Pending)> {
-        let m = video.measure.as_ref()?;
+    ) -> Option<(crate::patch::Strips, crate::patch::Drawn)> {
+        let ask = video.patch.as_ref()?;
         let s = &self.slots[self.current];
         let frame = frame.filter(|_| s.has_video || s.video_bound.is_some())?;
-        if self.disparity.is_none()
+        if self.patcher.is_none()
             || (s.tp10_bound.is_some() && !tp10)
-            || !crate::disparity::measurable(&video.format, video.rotation, frame.layout)
+            || !crate::patch::measurable(&video.format, video.rotation, frame.layout)
         {
             return None;
         }
-        let (w, place) = crate::disparity::window(p, m)?;
-        Some((
-            w,
-            crate::disparity::Pending {
-                place,
-                vertical: m.vertical,
-                tag: m.tag,
-                tp10,
-            },
-        ))
+        let (strips, mut drawn) = crate::patch::place(p, ask)?;
+        drawn.tp10 = tp10;
+        Some((strips, drawn))
     }
 
     /// Ends recording and submits the frame.
@@ -2186,7 +2177,7 @@ impl Drop for Renderer {
             if let Some(mut t) = self.tp10_eyes.take() {
                 t.destroy(&gpu);
             }
-            if let Some(mut m) = self.disparity.take() {
+            if let Some(mut m) = self.patcher.take() {
                 m.destroy(&gpu);
             }
             if let Some(mut m) = self.rates.take() {

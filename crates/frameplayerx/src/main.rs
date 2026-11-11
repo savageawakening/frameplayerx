@@ -626,8 +626,18 @@ fn run_xr(args: &Args) -> Result<(), Error> {
             }
             if let Some(pb) = &mut app.playback {
                 let af = pb.autofocus.take_stats();
-                if af.measured + af.blocked[0] + af.ui_holds > 0 {
+                if af.locks + af.eyes_moving + af.ui_holds > 0 {
                     log::info!("autofocus: {af}");
+                }
+                let ep = pb.epipolar.take_stats();
+                if ep.coarse + ep.fine > 0 {
+                    let fit = pb
+                        .epipolar
+                        .vertical_fit()
+                        .map_or("not yet fitted".into(), |(p, r)| {
+                            format!("pitch {p:+.2}° roll {r:+.2}°")
+                        });
+                    log::info!("autofocus measuring: {ep}; vertical {fit}");
                 }
                 let st = pb.player.stats();
                 let hdr = renderer

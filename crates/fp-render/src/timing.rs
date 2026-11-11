@@ -13,8 +13,8 @@ pub(crate) enum Mark {
     VideoDone,
     Eyes,
     EyesDone,
-    /// Autofocus's measurement, after the eye passes.
-    MeasureDone,
+    /// Autofocus's patch, after the eye passes.
+    PatchDone,
     End,
 }
 
@@ -30,7 +30,8 @@ pub struct GpuTimes {
     pub video: Option<f32>,
     /// Both eye passes.
     pub eyes: Option<f32>,
-    /// Autofocus measuring the picture's depth, on the frames that do.
+    /// Autofocus drawing a patch of the picture to measure, on the frames
+    /// that do.
     pub autofocus: Option<f32>,
     /// Copying panels into the compositor's layers.
     pub layers: Option<f32>,
@@ -54,10 +55,10 @@ fn parts(ticks: [Option<u64>; MARKS], bits: u32, period_ns: f32) -> GpuTimes {
         panels: ms(Mark::Start, Mark::Video),
         video: ms(Mark::Video, Mark::VideoDone),
         eyes: ms(Mark::Eyes, Mark::EyesDone),
-        autofocus: ms(Mark::EyesDone, Mark::MeasureDone),
-        // From the measurement when there was one, but only with eye passes.
+        autofocus: ms(Mark::EyesDone, Mark::PatchDone),
+        // From the patch when there was one, but only with eye passes.
         layers: ms(Mark::EyesDone, Mark::End)
-            .map(|eyes_on| ms(Mark::MeasureDone, Mark::End).unwrap_or(eyes_on)),
+            .map(|eyes_on| ms(Mark::PatchDone, Mark::End).unwrap_or(eyes_on)),
         total: ms(Mark::Start, Mark::End),
     }
 }
@@ -202,7 +203,7 @@ mod tests {
     fn parts_are_the_gaps_between_marks() {
         // 52 ns a tick, as on Adreno: 19.2 MHz.
         let mut ticks = at([0, 1000, 21_000, 21_000, 81_000, 0, 85_000]);
-        ticks[Mark::MeasureDone as usize] = None;
+        ticks[Mark::PatchDone as usize] = None;
         let t = parts(ticks, 64, 52.083);
         let near = |a: Option<f32>, b: f32| a.is_some_and(|a| (a - b).abs() < 1e-3);
         assert!(near(t.panels, 0.052), "{t:?}");
@@ -214,11 +215,15 @@ mod tests {
     }
 
     #[test]
-    fn a_measurement_is_its_own_part() {
+    fn a_patch_is_its_own_part() {
         let t = parts(at([0, 10, 20, 20, 70, 72, 80]), 64, 1e6);
         assert_eq!(t.eyes, Some(50.0));
         assert_eq!(t.autofocus, Some(2.0));
         assert_eq!(t.layers, Some(8.0));
+        let mut ticks = at([0, 10, 20, 20, 70, 0, 80]);
+        ticks[Mark::PatchDone as usize] = None;
+        let t = parts(ticks, 64, 1e6);
+        assert_eq!((t.autofocus, t.layers), (None, Some(10.0)));
     }
 
     #[test]

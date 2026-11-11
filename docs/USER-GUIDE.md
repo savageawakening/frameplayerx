@@ -611,7 +611,8 @@ measures how far away the picture is where you're looking and draws it so
 that what you look at is seen at its own distance. On a headset that tracks
 your eyes it follows them; otherwise it follows your head, so face what you
 want to look at. It eases from one distance to the next rather than jumping,
-and keeps the last one while it can't measure, over smooth walls or sky.
+and keeps the last one while it can't measure, over smooth walls or sky, or
+while you look at the menus.
 
 It's offered for 180° side-by-side videos, 8-bit or 10-bit, and stays on for
 those until you turn it off; off, the picture is drawn exactly as without it.

@@ -16,6 +16,7 @@
 pub mod autofocus;
 pub mod dirs;
 pub mod display;
+pub mod epipolar;
 pub mod format;
 pub mod language;
 pub mod playback;

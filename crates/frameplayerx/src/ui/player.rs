@@ -1164,7 +1164,7 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                         let measurable = pb.player.current_frame().is_some_and(|f| {
                             let rotation =
                                 pb.player.info().video_stream().map_or(0, |v| v.rotation);
-                            fp_render::disparity::measurable(&pb.format, rotation, f.layout)
+                            fp_render::patch::measurable(&pb.format, rotation, f.layout)
                         });
                         let autofocus = measurable.then_some(&mut v.settings.autofocus);
                         stereo_tab(ui, &mut pb.settings, true, autofocus);

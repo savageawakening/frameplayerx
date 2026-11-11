@@ -176,27 +176,32 @@ cameras were nothing changes. Without a focus the shader takes its old call,
 so the picture is exactly as before. The eyes' positions come from the eye
 views; `params.rs` mirrors the shader for the tests.
 
-A frame that asks (`VideoParams::measure`) runs a compute pass after the eye
-passes, through the frame as the eyes read it: the scene's descriptor set
-for planes, or the TP10 descriptors for a Q10C picture sampled in place
-(`shaders/disparity_planes.wgsl`, `disparity_tp10.wgsl`; the shader is built
-after `planes*.wgsl` for their `luma_at`). `fp-render/src/disparity.rs` maps
-the ray, from the eyes' gaze where they're tracked and the head otherwise,
-to a window half of each shift either side of it in both images, and
-`shaders/disparity.wgsl` correlates the luma and its differences at 256
-shifts (to 0.1 m), each sample the mean of four taps; then, at the best
-shift, 23 vertical shifts of ±2° by the differences down the window; and a
-coarse 8×4 picture of the left image. The result comes back when the frame's
-slot does. `fp_core::autofocus` judges it (low detail, search end, score,
-flat curve, a rival peak), votes the depth most of nine windows around the
-gaze support once the eyes have settled, moves the focus when three of five
-agree, learns the rig's vertical offset from clear matches that agree (trying
-0, ±1 and ±2° until they do) and searches at it, forgets its readings on a
-seek or a cut, and eases the drawn distance in vergence at a rate with
-acceleration. Distance comes from the disparity in longitude, the window's
-longitude and its latitude, so a subject reads the same anywhere in the
-picture. The log has an `autofocus:` line every 10 s with what stopped
-readings and the vertical offset, and the GPU line an `autofocus` part.
+A frame that asks (`VideoParams::patch`) runs a small compute pass after
+the eye passes, through the frame as the eyes read it: the scene's
+descriptor set for planes, or the TP10 descriptors for a Q10C picture sampled
+in place (`shaders/patch_planes.wgsl`, `patch_tp10.wgsl`; the shader is built
+after `planes*.wgsl` for their `luma_at`). `shaders/patch.wgsl` draws each
+eye's picture around the ray into strips along epipolar lines, a row to each
+plane through both cameras, so that a point's two images differ only along
+the row at any elevation; each sample is the mean of four taps, and one off
+the picture is marked so that no window uses it. A coarse 8×4 picture of the
+left image comes too, to notice cuts. The strips come back when the frame's
+slot does, and `fp_core::epipolar` matches them on a thread of its own
+(`fp-epipolar`), one patch in flight: zero-mean normalized cross-correlation
+over depths from 1° beyond infinity to 0.1 m and ±2° up and down, refined
+between samples, judged (blank, low correlation, flat, a search end, a rival
+peak with a valley between, the picture's edge, the cameras' axis). Clear
+matches fit the rig's pitch and roll (`roll · tan α · cos β` up and down,
+and `roll · sin β` taken off the shift), after which the search is ±0.5°
+about the prediction. Probes take turns on the target and 1.2° off on its
+diagonals; three of five readings within 0.3° of vergence, or the target and
+its neighbour within 0.5°, lock a depth, which `fp_core::autofocus` takes
+past a 15% hysteresis and eases the drawn distance to in vergence, at a rate
+with acceleration. Nothing is measured while the eyes move or are on a
+panel, and a seek or a cut clears the readings. The log has `autofocus:` and
+`autofocus measuring:` lines every 10 s (locks, time to lock after a move,
+rejections by why, the fitted pitch and roll, matching CPU time), and the GPU
+line an `autofocus` part.
 
 **Sources and browsing.** Every source implements one `Source` trait
 (`list`, `open`, `details`). Each kind gets its own browser in `ui/`:

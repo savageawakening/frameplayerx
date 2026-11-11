@@ -35,8 +35,8 @@ Phosphor Icons (regular and fill weights)
   Source: https://github.com/phosphor-icons/core
 
 Stereonaut (https://github.com/Erdnusschokolade/stereonaut): autofocus's
-  disparity measurement and focus decisions are adapted from it
-  (crates/fp-render/shaders/disparity.wgsl, crates/fp-core/src/autofocus.rs).
+  rule of refocusing only past a share of the distance is adapted from it
+  (crates/fp-core/src/autofocus.rs).
   Licence: MIT, text in Stereonaut-MIT.txt.
 
 Ubuntu Light, Hack, Noto Emoji and emoji-icon-font, which egui builds in as

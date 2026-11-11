@@ -9,6 +9,7 @@
 //! - [`math`]: OpenXR-style projection and view matrices.
 //! - [`capture`]: offscreen eye targets with read-back, for tests and
 //!   screenshots.
+//! - [`patch`]: autofocus's epipolar patches, to measure on another thread.
 //! - `q10c`: shows the Steam Frame decoder's 10-bit (Q10C) pictures.
 //! - [`hdr`]: HDR on the SDR screen: tone curve, gamut compression and the
 //!   scene peak, which `peak` measures from the frames.
@@ -17,13 +18,13 @@
 
 pub mod backdrop;
 pub mod capture;
-pub mod disparity;
 mod foveation;
 pub mod gpu;
 pub mod hdr;
 pub mod math;
 pub mod mem;
 pub mod params;
+pub mod patch;
 mod peak;
 mod pipeline;
 mod q10c;
@@ -75,6 +76,6 @@ pub(crate) const Q10C_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q10
 pub(crate) const PEAK_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/peak.spv"));
 pub(crate) const SCENE_TP10_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/scene_tp10.spv"));
-pub(crate) const DISPARITY_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/disparity.spv"));
-pub(crate) const DISPARITY_TP10_SPV: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/disparity_tp10.spv"));
+pub(crate) const PATCH_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/patch.spv"));
+pub(crate) const PATCH_TP10_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/patch_tp10.spv"));

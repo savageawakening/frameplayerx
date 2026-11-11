@@ -94,9 +94,9 @@ pub struct VideoParams {
     /// Autofocus: how far away the picture is taken to be, for a 180°/360°
     /// video. `None` draws it as it always has been.
     pub focus: Option<Focus>,
-    /// Autofocus: where to measure the picture's depth this frame, read back
-    /// with [`crate::Renderer::disparity_reading`].
-    pub measure: Option<crate::disparity::Measure>,
+    /// Epipolar measuring: a patch to draw this frame, read back with
+    /// [`crate::Renderer::patch_result`].
+    pub patch: Option<crate::patch::PatchAsk>,
 }
 
 /// The depth autofocus draws a 180°/360° picture at.
@@ -132,7 +132,7 @@ impl Default for VideoParams {
             rotation: 0,
             pixel_aspect: 1.0,
             focus: None,
-            measure: None,
+            patch: None,
         }
     }
 }

@@ -12,12 +12,12 @@ const MODULES: [(&str, &[&str]); 8] = [
     ("q10c", &["q10c"]),
     ("peak", &["hdr", "peak"]),
     (
-        "disparity",
-        &["hdr", "scene", "planes", "disparity_planes", "disparity"],
+        "patch",
+        &["hdr", "scene", "planes", "patch_planes", "patch"],
     ),
     (
-        "disparity_tp10",
-        &["hdr", "scene", "planes_tp10", "disparity_tp10", "disparity"],
+        "patch_tp10",
+        &["hdr", "scene", "planes_tp10", "patch_tp10", "patch"],
     ),
 ];
 
@@ -47,13 +47,6 @@ fn main() {
         let options = naga::back::spv::Options {
             lang_version: (1, 3),
             flags: naga::back::spv::WriterFlags::empty(),
-            // The disparity shader writes its workgroup memory before reading
-            // it; clearing 19 KB first would be for nothing.
-            zero_initialize_workgroup_memory: if name.starts_with("disparity") {
-                naga::back::spv::ZeroInitializeWorkgroupMemoryMode::None
-            } else {
-                naga::back::spv::ZeroInitializeWorkgroupMemoryMode::Polyfill
-            },
             ..Default::default()
         };
         let words = naga::back::spv::write_vec(&module, &info, &options, None)

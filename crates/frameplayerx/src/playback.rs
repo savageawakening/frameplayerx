@@ -105,6 +105,12 @@ pub struct Playback {
     /// Whether the last frame seen could be measured: kept while a frame is
     /// missing for a moment, so that a stall doesn't switch it off and on.
     pub autofocus_measurable: bool,
+    /// Autofocus's measuring, its matching thread, frames since a patch was
+    /// asked for without coming back, and the gaze, smoothed.
+    pub epipolar: fp_core::epipolar::Epipolar,
+    pub epipolar_worker: Option<fp_core::epipolar::Worker>,
+    pub epipolar_waiting: u32,
+    pub gaze_filter: fp_core::epipolar::GazeFilter,
     /// Adjustments differ from what is saved for this video.
     pub settings_dirty: bool,
     /// What is saved for this video (the Passthrough tab saves its part
@@ -719,6 +725,10 @@ pub fn open(
             autofocus: Autofocus::default(),
             autofocus_at: None,
             autofocus_measurable: false,
+            epipolar: Default::default(),
+            epipolar_worker: fp_core::epipolar::Worker::start(),
+            epipolar_waiting: 0,
+            gaze_filter: Default::default(),
             settings_dirty: false,
             heatmap,
             markers,

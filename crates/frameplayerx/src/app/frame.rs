@@ -2,6 +2,7 @@
 //! draws.
 
 use super::*;
+use fp_core::epipolar::{Job, Worker};
 
 impl App {
     /// Forward becomes where the head faces, and the browse panel comes
@@ -586,7 +587,7 @@ impl App {
         }
         let anchor_rot = anchor.to_scale_rotation_translation().1;
         let player = self.picture_anchor(anchor);
-        let reading = renderer.disparity_reading();
+        let patch = renderer.patch_result();
         if let (Some(p), Some(s)) = (&mut self.playback, shown) {
             frame = p.player.current_frame();
             video.format = p.format;
@@ -604,7 +605,7 @@ impl App {
                 frame.as_ref(),
                 &mut video,
                 input,
-                reading,
+                patch,
             );
             if let Some((_, rot)) = input.head {
                 let rel = anchor_rot.inverse() * rot;
@@ -834,10 +835,11 @@ fn perf_video(
     })
 }
 
-/// Autofocus for this frame: takes in what was measured, asks for the next
-/// window around where the eyes look (else where the head faces), and draws
+/// Autofocus for this frame: takes in what was matched, asks for the next
+/// patch around where the eyes look (else where the head faces), and draws
 /// the picture at the distance it has eased to. Off, or for a video it can't
-/// measure, the picture is drawn as without it, at once.
+/// measure, the picture is drawn as without it, at once. With the eyes on a
+/// panel, nothing is measured and the focus holds.
 fn autofocus(
     p: &mut Playback,
     on_ui: bool,
@@ -845,14 +847,14 @@ fn autofocus(
     frame: Option<&Arc<VideoFrame>>,
     video: &mut VideoParams,
     input: &FrameInput,
-    reading: Option<fp_core::autofocus::Reading>,
+    patch: Option<fp_render::patch::PatchResult>,
 ) {
     let af = &mut p.autofocus;
     // A frame missing for a moment (a stall, a seek) keeps the last verdict:
     // switching off and on again would snap the picture back and ease it in.
     let measurable = match frame {
         Some(f) => {
-            let m = fp_render::disparity::measurable(&video.format, video.rotation, f.layout);
+            let m = fp_render::patch::measurable(&video.format, video.rotation, f.layout);
             p.autofocus_measurable = m;
             m
         }
@@ -861,6 +863,7 @@ fn autofocus(
     if !on || !measurable {
         af.off();
         p.autofocus_at = None;
+        p.epipolar.moved();
         return;
     }
     // A seek: what was measured was of another part of the video.
@@ -869,37 +872,81 @@ fn autofocus(
             .is_some_and(|t| f.pts < t - 0.05 || f.pts > t + 1.0)
         {
             af.clear();
+            p.epipolar.clear();
         }
         p.autofocus_at = Some(f.pts);
     }
-    // Eyes on a panel: nothing measured, nothing counted against them, the
-    // focus held. Readings asked for before are of where they were.
+    // The gaze smoothed while it rests, followed at once as it moves.
+    let gaze = p
+        .gaze_filter
+        .take(input.gaze.map(|g| g.to_array()), input.dt)
+        .map(Vec3::from_array);
     let settled = if on_ui {
         af.on_ui(input.dt);
         false
     } else {
-        af.look(input.gaze.map(|g| g.to_array()), input.dt)
+        af.look(gaze.map(|g| g.to_array()), input.dt)
     };
-    if let Some(r) = reading.filter(|_| !on_ui) {
-        af.measured(&r);
+    if !settled {
+        p.epipolar.moved();
     }
-    if af.due() && frame.is_some() {
-        let ahead = input.gaze.or(input.head.map(|(_, rot)| rot * Vec3::NEG_Z));
-        match (settled, ahead) {
-            (true, Some(ahead)) => {
-                let (tag, [right, up]) = af.next_near();
-                let up_axis = input.head.map_or(Vec3::Y, |(_, rot)| rot * Vec3::Y);
-                video.measure = Some(fp_render::disparity::Measure {
-                    ray: near_gaze(ahead, up_axis, right, up),
-                    vertical: af.vertical_offset(),
-                    prefilter: af.tuning.prefilter,
-                    centre: 0.0,
-                    tag,
-                });
-            }
-            (false, _) if !on_ui => af.eyes_moving(),
-            _ => {}
+    // A drawn patch goes to be matched; a match is taken in and may lock a
+    // depth; then the next patch, one in flight at a time.
+    if let Some(patch) = patch {
+        p.epipolar_waiting = 0;
+        match &p.epipolar_worker {
+            Some(w) => w.send(Job {
+                at: patch.at,
+                lon: patch.lon,
+                layout: patch.layout,
+                left: patch.left,
+                right: patch.right,
+                signature: patch.signature,
+            }),
+            None => p.epipolar.missed(),
         }
+    }
+    while let Some(done) = p.epipolar_worker.as_ref().and_then(Worker::take) {
+        if on_ui {
+            // Of where the eyes were before they went to the panel.
+            p.epipolar.missed();
+            continue;
+        }
+        let lock = p.epipolar.matched(
+            done.at,
+            done.lon,
+            &done.layout,
+            &done.found,
+            done.micros,
+            &done.signature,
+        );
+        if let Some(angle) = lock
+            && settled
+        {
+            af.lock(angle);
+        }
+    }
+    if p.epipolar_waiting > 0 {
+        p.epipolar_waiting += 1;
+        // Asked for where nothing could be drawn.
+        if p.epipolar_waiting > 6 {
+            p.epipolar_waiting = 0;
+            p.epipolar.missed();
+        }
+    }
+    let ahead = gaze.or(input.head.map(|(_, rot)| rot * Vec3::NEG_Z));
+    if settled
+        && frame.is_some()
+        && let Some(ahead) = ahead
+        && let Some((aim, layout)) = p.epipolar.next_patch(gaze.is_some())
+    {
+        video.patch = Some(fp_render::patch::PatchAsk {
+            ray: ahead,
+            aim,
+            layout,
+            vertical: p.epipolar.vertical_fit(),
+        });
+        p.epipolar_waiting = 1;
     }
     let baseline = af.tuning.baseline;
     video.focus = af
@@ -912,14 +959,6 @@ fn gaze_hits<'a>(panels: impl Iterator<Item = &'a Panel>, at: Vec3, gaze: Vec3) 
     panels
         .filter(|p| p.shown())
         .any(|p| p.hit(at, gaze).is_some())
-}
-
-/// A direction `right` and `up` degrees from `ahead`, turning about `up_axis`
-/// (where the head's up is) and then about the axis across both.
-fn near_gaze(ahead: Vec3, up_axis: Vec3, right: f32, up: f32) -> Vec3 {
-    let across = ahead.cross(up_axis).try_normalize().unwrap_or(Vec3::X);
-    let turned = Quat::from_axis_angle(up_axis.normalize(), -right.to_radians()) * ahead;
-    Quat::from_axis_angle(across, up.to_radians()) * turned
 }
 
 #[cfg(test)]
@@ -939,26 +978,6 @@ mod tests {
         assert!(gaze_hits([&p].into_iter(), at, Vec3::NEG_Z));
         let away = Vec3::new(0.6, 0.0, -0.8);
         assert!(!gaze_hits([&p].into_iter(), at, away));
-    }
-
-    #[test]
-    fn windows_near_the_gaze_are_turned_from_it_as_asked() {
-        let ahead = Vec3::NEG_Z;
-        assert!((near_gaze(ahead, Vec3::Y, 0.0, 0.0) - ahead).length() < 1e-6);
-        let right = near_gaze(ahead, Vec3::Y, 3.0, 0.0);
-        assert!(right.x > 0.0 && (right.angle_between(ahead).to_degrees() - 3.0).abs() < 1e-3);
-        let up = near_gaze(ahead, Vec3::Y, 0.0, 3.0);
-        assert!(up.y > 0.0 && (up.angle_between(ahead).to_degrees() - 3.0).abs() < 1e-3);
-        // With the head tilted, "up" is the head's.
-        let tilted = Quat::from_rotation_z(0.5) * Vec3::Y;
-        let up = near_gaze(ahead, tilted, 0.0, 3.0);
-        assert!(
-            (up.normalize()
-                - (Quat::from_rotation_z(0.5) * Vec3::new(0.0, 0.0523, -0.9986)).normalize())
-            .length()
-                < 1e-3,
-            "{up}"
-        );
     }
 
     #[test]

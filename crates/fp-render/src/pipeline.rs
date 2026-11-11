@@ -139,8 +139,8 @@ pub(crate) fn set_layout(
                 .binding(i)
                 .descriptor_type(t)
                 .descriptor_count(1)
-                // Compute too: autofocus measures the frame through the
-                // scene's set (crate::disparity).
+                // Compute too: autofocus draws its patches through the
+                // scene's set (crate::patch).
                 .stage_flags(
                     vk::ShaderStageFlags::FRAGMENT
                         | vk::ShaderStageFlags::VERTEX
