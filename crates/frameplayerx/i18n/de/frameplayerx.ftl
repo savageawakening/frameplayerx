@@ -313,6 +313,7 @@ adjust-autofocus = Autofokus
 adjust-autofocus-desc = Zeigt, was du ansiehst, in seiner eigenen Tiefe, wie weit deine Augen auch auseinander sind.
 adjust-depth = Tiefe
 adjust-depth-desc = Augenabstand; niedriger, wenn sich die Bilder schwer verbinden.
+adjust-depth-autofocus-desc = Bei eingeschaltetem Autofokus ohne Wirkung: Der Autofokus stellt die Tiefe dessen, was du ansiehst, bereits ein.
 adjust-vertical-align = Vertikal ausrichten
 adjust-rotation-align = Drehung ausrichten
 adjust-swap-eyes = Augen tauschen

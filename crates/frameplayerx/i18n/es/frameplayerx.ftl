@@ -313,6 +313,7 @@ adjust-autofocus = Enfoque automático
 adjust-autofocus-desc = Muestra lo que miras a su propia profundidad, sea cual sea la distancia entre tus ojos.
 adjust-depth = Profundidad
 adjust-depth-desc = Separación de los ojos; más baja si cuesta fusionar las imágenes.
+adjust-depth-autofocus-desc = Con el autoenfoque activado no se aplica: el autoenfoque ya ajusta la profundidad de lo que miras.
 adjust-vertical-align = Alineación vertical
 adjust-rotation-align = Alineación de giro
 adjust-swap-eyes = Intercambiar ojos

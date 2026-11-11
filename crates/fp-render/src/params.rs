@@ -275,13 +275,32 @@ pub(crate) fn build(
         ),
         None => (0.0, 0.0),
     };
+    // Never a value the shader can't use: an unknown distance or
+    // separation draws as without autofocus rather than as nothing.
+    let focus = match video.focus {
+        Some(f) if kind != 0 && f.distance.is_finite() && f.baseline.is_finite() => Vec4::new(
+            f.distance.clamp(MIN_FOCUS_DISTANCE, MAX_FOCUS_DISTANCE),
+            f.baseline.clamp(0.0, MAX_BASELINE),
+            0.0,
+            0.0,
+        ),
+        _ => Vec4::ZERO,
+    };
+    // While autofocus draws the picture, it puts what the eyes are on at its
+    // own distance for where the eyes really are: the IPD offset would only
+    // shift that, so it's left out (the alignment turns stay).
+    let ipd_offset = if focus.x > 0.0 {
+        0.0
+    } else {
+        deg(s.ipd_offset)
+    };
     SceneParams {
         inv_view_proj,
         correction,
         anchor_inv: Mat4::from_quat(video.anchor.inverse()),
         screen_inv: video.screen_pose.inverse(),
         mode: [kind, stereo, swap, layout_code],
-        proj: Vec4::new(h_fov, v_fov, s.zoom.max(0.05), deg(s.ipd_offset)),
+        proj: Vec4::new(h_fov, v_fov, s.zoom.max(0.05), ipd_offset),
         lens: Vec4::new(
             s.lens_k1,
             s.lens_k2,
@@ -316,17 +335,7 @@ pub(crate) fn build(
         hdr: hdr_levels(crate::hdr::DEFAULT_PEAK),
         tp10: Vec4::ZERO,
         tp10_uv: Vec4::ZERO,
-        // Never a value the shader can't use: an unknown distance or
-        // separation draws as without autofocus rather than as nothing.
-        focus: match video.focus {
-            Some(f) if kind != 0 && f.distance.is_finite() && f.baseline.is_finite() => Vec4::new(
-                f.distance.clamp(MIN_FOCUS_DISTANCE, MAX_FOCUS_DISTANCE),
-                f.baseline.clamp(0.0, MAX_BASELINE),
-                0.0,
-                0.0,
-            ),
-            _ => Vec4::ZERO,
-        },
+        focus,
         eyes: [Vec4::ZERO; 2],
     }
 }
@@ -362,7 +371,6 @@ pub(crate) fn off_centre(d: Vec3, p: Vec3, r: f32) -> Vec3 {
 }
 
 /// Mirrors `softly_inside` in shaders/scene.wgsl.
-#[cfg(test)]
 pub(crate) fn softly_inside(p: Vec3, r: f32) -> Vec3 {
     let len = p.length();
     let limit = 0.9 * r;
@@ -388,7 +396,6 @@ pub(crate) fn zoom_dir(d: Vec3, zoom: f32) -> Vec3 {
 /// Mirrors the spherical path of `fs_main` in shaders/scene.wgsl: the
 /// direction in the video, from its camera, that eye `eye` sees along the
 /// world-space `ray`.
-#[cfg(test)]
 pub(crate) fn video_dir(p: &SceneParams, ray: Vec3, eye: usize) -> Vec3 {
     let s = if eye == 1 { 0.5 } else { -0.5 };
     let mut d = p.anchor_inv.transform_vector3(ray);
@@ -679,6 +686,32 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(build(&flat, None, [Mat4::IDENTITY; 2]).focus, Vec4::ZERO);
+    }
+
+    #[test]
+    fn the_ipd_offset_is_left_out_while_autofocus_draws() {
+        let video = |focus| VideoParams {
+            format: VideoFormat::new(Projection::EQUIRECT_180, StereoLayout::SideBySide),
+            settings: ViewSettings {
+                ipd_offset: 3.0,
+                vertical_align: 1.0,
+                ..Default::default()
+            },
+            focus,
+            ..Default::default()
+        };
+        let off = build(&video(None), None, [Mat4::IDENTITY; 2]);
+        assert!((off.proj.w - 3f32.to_radians()).abs() < 1e-6);
+        let on = build(
+            &video(Some(Focus {
+                distance: 0.5,
+                baseline: 0.064,
+            })),
+            None,
+            [Mat4::IDENTITY; 2],
+        );
+        assert_eq!(on.proj.w, 0.0);
+        assert_eq!(on.lens.z, off.lens.z, "the alignment stays");
     }
 
     #[test]

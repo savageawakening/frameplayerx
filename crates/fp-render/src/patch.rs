@@ -7,14 +7,14 @@
 
 use crate::gpu::Gpu;
 use crate::mem::{self, Buffer};
-use crate::params::{SceneParams, off_centre, zoom_dir};
+use crate::params::SceneParams;
 use crate::{Result, VkContext};
 use ash::vk;
 use fp_core::epipolar::SIGNATURE;
 use fp_core::epipolar::{Aim, Layout};
 use fp_core::format::{Projection, StereoLayout, VideoFormat};
 use fp_media::PixelLayout;
-use glam::{Vec2, Vec3, Vec4Swizzles};
+use glam::{Vec2, Vec3};
 use gpu_allocator::MemoryLocation;
 use std::f32::consts::TAU;
 
@@ -135,11 +135,14 @@ pub struct PatchAsk {
     /// The rig's pitch and roll, degrees, for a layout whose vertical offset
     /// is left to be predicted where it lands (NaN).
     pub vertical: Option<(f32, f32)>,
+    /// Handed back with the patch, to tell a late one.
+    pub tag: u64,
 }
 
 /// A drawn patch.
 #[derive(Clone, Debug)]
 pub struct PatchResult {
+    pub tag: u64,
     /// Its middle's `α`, `β`, degrees, and the longitude it's at.
     pub at: [f32; 2],
     pub lon: f32,
@@ -171,6 +174,7 @@ pub(crate) struct Strips {
 /// What a slot drew, until it's read.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Drawn {
+    pub tag: u64,
     pub at: [f32; 2],
     pub lon: f32,
     pub layout: Layout,
@@ -185,6 +189,10 @@ fn turned(d: Vec3, right: f32, up: f32) -> Vec3 {
     glam::Quat::from_axis_angle(across, up.to_radians()) * d
 }
 
+fn ray_of(ask: &PatchAsk) -> Option<Vec3> {
+    ask.ray.try_normalize()
+}
+
 /// Where a patch asked for goes, for a 180° side by side picture drawn by
 /// `p`: the shader's push constants and what to note. `None` when it misses
 /// the picture or doesn't fit.
@@ -196,11 +204,12 @@ pub(crate) fn place(p: &SceneParams, ask: &PatchAsk) -> Option<(Strips, Drawn)> 
     let (alpha, beta) = match ask.aim {
         Aim::At([a, b]) => (a.to_radians(), b.to_radians()),
         Aim::Ray([right, up]) => {
-            let ray = ask.ray.try_normalize()?;
-            let room = p.anchor_inv.transform_vector3(turned(ray, right, up));
-            let d = p.correction.transform_vector3(room).normalize();
-            let viewer = p.correction.transform_vector3(p.viewer.xyz());
-            let d = zoom_dir(off_centre(d, viewer, p.viewer.w), p.proj.z);
+            // Where the eyes see along the ray, as the eye passes draw it
+            // (with the viewer's offset and the focus as they are): the
+            // middle of what each eye's picture shows there.
+            let ray = turned(ray_of(ask)?, right, up);
+            let d = (crate::params::video_dir(p, ray, 0) + crate::params::video_dir(p, ray, 1))
+                .try_normalize()?;
             if d.z >= 0.0 {
                 return None;
             }
@@ -244,6 +253,7 @@ pub(crate) fn place(p: &SceneParams, ask: &PatchAsk) -> Option<(Strips, Drawn)> 
             padding2: 0.0,
         },
         Drawn {
+            tag: ask.tag,
             at: [alpha.to_degrees(), beta.to_degrees()],
             lon,
             layout: l,
@@ -275,6 +285,7 @@ pub(crate) fn result(bytes: &[u8], d: &Drawn) -> PatchResult {
     let mut signature = [0.0; SIGNATURE];
     signature.copy_from_slice(&f[end..end + SIGNATURE]);
     PatchResult {
+        tag: d.tag,
         at: d.at,
         lon: d.lon,
         layout: d.layout,
@@ -458,7 +469,44 @@ mod tests {
             aim,
             layout: Layout::coarse(256, 0.0, 2.0),
             vertical: None,
+            tag: 0,
         }
+    }
+
+    #[test]
+    fn the_patch_is_where_the_picture_is_drawn_with_offsets_and_focus() {
+        let shifted = params::build(
+            &VideoParams {
+                format: VideoFormat::new(Projection::EQUIRECT_180, StereoLayout::SideBySide),
+                settings: fp_core::view::ViewSettings {
+                    height: 0.3,
+                    forward: 0.2,
+                    ..Default::default()
+                },
+                focus: Some(crate::Focus {
+                    distance: 0.8,
+                    baseline: 0.064,
+                }),
+                ..Default::default()
+            },
+            None,
+            [Mat4::IDENTITY; 2],
+        );
+        let ray = turned(Vec3::NEG_Z, 15.0, 10.0);
+        let (_, d) = place(&shifted, &ask(ray, Aim::Ray([0.0, 0.0]))).unwrap();
+        let shown =
+            (params::video_dir(&shifted, ray, 0) + params::video_dir(&shifted, ray, 1)).normalize();
+        let (a, b) = (d.at[0].to_radians(), d.at[1].to_radians());
+        let at = Vec3::new(a.sin(), -a.cos() * b.sin(), -a.cos() * b.cos());
+        assert!(at.angle_between(shown).to_degrees() < 0.01, "{at} {shown}");
+        // Not where it would be without them.
+        let (_, plain) = place(&params(), &ask(ray, Aim::Ray([0.0, 0.0]))).unwrap();
+        assert!(
+            (plain.at[1] - d.at[1]).abs() > 1.0,
+            "{:?} {:?}",
+            plain.at,
+            d.at
+        );
     }
 
     #[test]

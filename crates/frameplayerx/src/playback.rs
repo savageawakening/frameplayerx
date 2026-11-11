@@ -110,6 +110,8 @@ pub struct Playback {
     pub epipolar: fp_core::epipolar::Epipolar,
     pub epipolar_worker: Option<fp_core::epipolar::Worker>,
     pub epipolar_waiting: u32,
+    /// Where autofocus measures, gliding between the eyes and the head.
+    pub autofocus_aim: Aim,
     pub gaze_filter: fp_core::epipolar::GazeFilter,
     /// Adjustments differ from what is saved for this video.
     pub settings_dirty: bool,
@@ -728,6 +730,7 @@ pub fn open(
             epipolar: Default::default(),
             epipolar_worker: fp_core::epipolar::Worker::start(),
             epipolar_waiting: 0,
+            autofocus_aim: Default::default(),
             gaze_filter: Default::default(),
             settings_dirty: false,
             heatmap,
@@ -2236,4 +2239,11 @@ mod tests {
         use_saved_source_tracks(&mut asked, &PickedTracks::default(), &tracks);
         assert_eq!(asked.source_audio.as_deref(), Some("201"));
     }
+}
+
+/// Where autofocus aims, and whether it's still gliding back to the eyes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Aim {
+    pub dir: Option<glam::Vec3>,
+    pub regaining: bool,
 }

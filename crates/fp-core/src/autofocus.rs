@@ -15,14 +15,29 @@ pub const BASELINE: f32 = 0.064;
 /// The nearest the picture is drawn, metres (fp_render's own limit too).
 pub const MIN_DISTANCE: f32 = 0.1;
 /// How far, as a share of the distance, a new depth must be from the focus to
-/// refocus, so that noise in the measurement doesn't move the picture.
+/// refocus, so that noise in the measurement doesn't move the picture; it's
+/// reckoned in vergence, where infinity is no different, and never less
+/// than a small step.
 const HYSTERESIS: f32 = 0.15;
+const MIN_STEP: f32 = 0.15;
+/// Beyond the rate, the drawn distance glides at this share of what's left
+/// a second, up to this many times the rate: a big change doesn't crawl,
+/// and a small one stays gentle.
+const GLIDE: f32 = 2.0;
+const MAX_GLIDE: f32 = 6.0;
+/// The eyes are on the way somewhere (a saccade) when their filtered speed
+/// passes this, degrees a second; slower and steady, they're following
+/// something (pursuit), and that's measured along.
+const SACCADE_SPEED: f32 = 60.0;
+/// Seconds the speed is smoothed over.
+const SPEED_SMOOTHING: f32 = 0.03;
 /// Degrees of vergence a second the drawn distance moves at, and degrees a
 /// second per second it speeds up and slows down at.
 pub const RATE: f32 = 5.0;
 pub const ACCELERATION: f32 = 62.5;
-/// The eyes have settled once they've stayed within this many degrees for this
-/// long; moving further starts again.
+/// The eyes have settled once they've moved no faster than a pursuit for this
+/// long; a jump of this many degrees from one frame to the next starts
+/// again whatever the speed.
 pub const SETTLE_DEGREES: f32 = 2.0;
 const SETTLE_SECONDS: f32 = 0.1;
 /// After the eyes are lost, seconds before the head takes over: a blink
@@ -41,7 +56,7 @@ pub struct Tuning {
     pub acceleration: f32,
     /// How far apart the cameras were, metres.
     pub baseline: f32,
-    /// How far the eyes can wander and still count as settled, degrees.
+    /// A jump between frames that starts settling again, degrees.
     pub settle_degrees: f32,
 }
 
@@ -198,8 +213,10 @@ pub struct Autofocus {
     focus: Option<f32>,
     /// The angle drawn, moving towards the focus.
     shown: Easing,
-    /// Where the eyes have stayed, and for how long.
+    /// Where the eyes were last frame, how fast they're going (degrees a
+    /// second, smoothed), and how long they've been no faster than a pursuit.
     anchor: Option<[f32; 3]>,
+    speed: f32,
     held: f32,
     /// Seconds since the eyes were lost, until the head takes over.
     lost: Option<f32>,
@@ -220,21 +237,29 @@ impl Autofocus {
         let settled = match gaze {
             Some(now) => {
                 self.lost = None;
-                if self
-                    .anchor
-                    .is_some_and(|at| degrees_between(at, now) <= self.tuning.settle_degrees)
-                {
-                    self.held += dt;
-                } else {
-                    self.anchor = Some(now);
+                let step = self.anchor.map(|at| degrees_between(at, now));
+                if let Some(step) = step {
+                    let k = 1.0 - (-dt.max(1e-4) / SPEED_SMOOTHING).exp();
+                    self.speed += k * (step / dt.max(1e-4) - self.speed);
+                }
+                self.anchor = Some(now);
+                let saccade = step.is_none_or(|step| {
+                    step > self.tuning.settle_degrees || self.speed > SACCADE_SPEED
+                });
+                if saccade {
+                    if self.held > 0.0 || step.is_none() {
+                        self.since_move = Some(0.0);
+                    }
                     self.held = 0.0;
-                    self.since_move = Some(0.0);
+                } else {
+                    self.held += dt;
                 }
                 self.held >= SETTLE_SECONDS
             }
             None => {
                 if self.anchor.take().is_some() {
                     self.lost = Some(0.0);
+                    self.speed = 0.0;
                 }
                 self.lost = self.lost.map(|t| t + dt).filter(|t| *t < EYES_LOST_SECONDS);
                 self.lost.is_none()
@@ -257,6 +282,7 @@ impl Autofocus {
         self.on_ui = true;
         self.stats.ui_time += dt;
         self.anchor = None;
+        self.speed = 0.0;
         self.lost = None;
         self.held = 0.0;
         self.since_move = None;
@@ -273,11 +299,9 @@ impl Autofocus {
             self.stats.lock_times[self.stats.lock_count % LOCK_TIMES] = t;
             self.stats.lock_count += 1;
         }
-        let b = self.tuning.baseline;
         let moved = std::mem::take(&mut self.cleared)
             || self.focus.is_none_or(|focus| {
-                let at = distance(focus, b);
-                (distance(angle, b) - at).abs() > HYSTERESIS * at
+                (angle - focus).abs() > (HYSTERESIS * angle.max(focus)).max(MIN_STEP)
             });
         if moved {
             self.focus = Some(angle);
@@ -327,7 +351,9 @@ impl Autofocus {
         }
         let nearest = angle(MIN_DISTANCE, t.baseline);
         let target = self.focus.map_or(0.0, |a| a.clamp(0.0, nearest));
-        let shown = self.shown.step(target, dt, t.rate, t.acceleration);
+        let gap = (target - self.shown.value).abs();
+        let rate = (GLIDE * gap).clamp(t.rate, MAX_GLIDE * t.rate);
+        let shown = self.shown.step(target, dt, rate, t.acceleration);
         (shown > 1e-4).then(|| distance(shown, t.baseline).max(MIN_DISTANCE))
     }
 }
@@ -484,6 +510,60 @@ mod tests {
     }
 
     #[test]
+    fn from_infinity_a_near_reading_moves_the_focus() {
+        let mut a = Autofocus::default();
+        a.lock(0.0);
+        assert_eq!(settle(&mut a), None, "infinity");
+        a.lock(angle(1.5, BASELINE));
+        let got = settle(&mut a).expect("moved off infinity");
+        assert!((got - 1.5).abs() < 0.01, "{got}");
+        // And back out, past the hysteresis.
+        a.lock(0.0);
+        assert_eq!(settle(&mut a), None);
+    }
+
+    #[test]
+    fn a_big_change_glides_faster_than_the_rate_and_a_small_one_doesnt() {
+        let time_to = |from: f32, to: f32| {
+            let mut a = Autofocus::default();
+            a.lock(angle(from, BASELINE));
+            settle(&mut a);
+            a.lock(angle(to, BASELINE));
+            let target = angle(to, BASELINE);
+            let mut t = 0.0;
+            while (angle(a.advance(1.0 / 90.0).unwrap(), BASELINE) - target).abs() > 0.01 {
+                t += 1.0 / 90.0;
+                assert!(t < 10.0);
+            }
+            t
+        };
+        // 3 m to 0.25 m is about 13.4° of vergence: at 5°/s alone 2.8 s.
+        let big = time_to(3.0, 0.25);
+        assert!(big < 1.8, "{big}");
+        // 1 m to 0.8 m is under 1°: no faster than the rate.
+        let small = time_to(1.0, 0.8);
+        let at_rate = (angle(0.8, BASELINE) - angle(1.0, BASELINE)) / RATE;
+        assert!(small >= at_rate * 0.9, "{small} {at_rate}");
+    }
+
+    #[test]
+    fn following_something_moving_is_measured_along() {
+        let mut a = Autofocus::default();
+        let at = |deg: f32| {
+            let r = deg.to_radians();
+            [r.sin(), 0.0, -r.cos()]
+        };
+        // A pursuit at 20°/s: settled after the settle time, and stays so.
+        let mut settled = Vec::new();
+        for i in 0..90 {
+            settled.push(a.look(Some(at(i as f32 * 20.0 / 90.0)), 1.0 / 90.0));
+        }
+        assert!(settled[20..].iter().all(|s| *s), "{settled:?}");
+        // A saccade: unsettled again.
+        assert!(!a.look(Some(at(40.0)), 1.0 / 90.0));
+    }
+
+    #[test]
     fn off_is_at_once() {
         let mut a = Autofocus::default();
         a.lock(8.0);
@@ -500,14 +580,15 @@ mod tests {
         a.lock(angle(0.5, BASELINE));
         let dt = 1.0 / 90.0;
         let mut angles = Vec::new();
-        for _ in 0..90 {
+        for _ in 0..180 {
             let d = a.advance(dt).unwrap();
             angles.push(angle(d, BASELINE));
         }
-        let steps: Vec<f32> = angles.windows(2).map(|w| (w[1] - w[0]) / dt).collect();
-        for s in &steps[20..60] {
-            assert!((s - RATE).abs() < 0.05, "{s}");
-        }
+        // Rising in vergence throughout, never past the target, and there.
+        assert!(angles.windows(2).all(|w| w[1] >= w[0] - 1e-5));
+        let target = angle(0.5, BASELINE);
+        assert!(angles.iter().all(|a| *a <= target + 1e-3));
+        assert!((angles[179] - target).abs() < 1e-3);
     }
 
     /// Moves `change` degrees at `hz`: how long it took, and the fastest it

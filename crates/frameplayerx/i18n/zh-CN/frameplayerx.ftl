@@ -307,6 +307,7 @@ adjust-autofocus = 自动对焦
 adjust-autofocus-desc = 无论双眼间距如何，都以真实深度显示你注视的内容。
 adjust-depth = 深度
 adjust-depth-desc = 双眼间距；如果难以融合画面就调低。
+adjust-depth-autofocus-desc = 开启自动对焦时不生效：自动对焦已经会调整你所看之处的深度。
 adjust-vertical-align = 垂直对齐
 adjust-rotation-align = 旋转对齐
 adjust-swap-eyes = 交换左右眼

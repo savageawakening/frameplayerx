@@ -168,6 +168,7 @@ fn epipolar_at(
         aim: Aim::Ray([0.0, 0.0]),
         layout: Layout::coarse(256, vertical, reach),
         vertical: fit,
+        tag: 0,
     };
     let (mut gpu, mut cpu) = (0.0, 0.0);
     let mut pass = |ask: &PatchAsk, r: &mut Renderer| {

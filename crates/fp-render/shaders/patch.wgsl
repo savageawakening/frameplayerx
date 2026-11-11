@@ -32,7 +32,8 @@ struct Strips {
 };
 var<immediate> strips: Strips;
 
-const SIGNATURE: u32 = 32u;
+// 16×8 cells, each the mean of a 4×4 grid over its area.
+const SIGNATURE: u32 = 128u;
 
 fn epipolar_luma(alpha: f32, beta: f32, slot: f32) -> f32 {
     let d = vec3<f32>(sin(alpha), -cos(alpha) * sin(beta), -cos(alpha) * cos(beta));
@@ -76,13 +77,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         out[i] = sample_at(strips.centre + strips.right_start + cr * strips.pitch, strips.slots.y);
     } else if (i < left + right + SIGNATURE) {
         let k = i - left - right;
-        let cell = vec2<f32>(f32(k % 8u), f32(k / 8u));
+        let cell = vec2<f32>(f32(k % 16u), f32(k / 16u));
         let lo = 0.5 * strips.slots.x;
         var sum = 0.0;
-        for (var t = 0u; t < 4u; t++) {
-            let f = (cell + vec2<f32>(0.25 + 0.5 * f32(t & 1u), 0.25 + 0.5 * f32(t / 2u))) / vec2<f32>(8.0, 4.0);
+        for (var t = 0u; t < 16u; t++) {
+            let tap = vec2<f32>((f32(t % 4u) + 0.5) / 4.0, (f32(t / 4u) + 0.5) / 4.0);
+            let f = (cell + tap) / vec2<f32>(16.0, 8.0);
             sum += luma_at(vec2<f32>(lo + 0.5 * f.x, f.y));
         }
-        out[i] = 0.25 * sum;
+        out[i] = sum / 16.0;
     }
 }

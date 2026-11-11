@@ -417,6 +417,7 @@ adjust-autofocus = Autofocus
 adjust-autofocus-desc = Shows what you look at at its own depth, however far apart your eyes are.
 adjust-depth = Depth
 adjust-depth-desc = Eye separation; lower if it's hard to fuse.
+adjust-depth-autofocus-desc = With autofocus on, this doesn't apply: autofocus already sets the depth of what you're looking at.
 adjust-vertical-align = Vertical align
 adjust-rotation-align = Rotation align
 adjust-swap-eyes = Swap eyes

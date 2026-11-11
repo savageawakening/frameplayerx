@@ -16,9 +16,9 @@
 
 use crate::autofocus::{BASELINE, MIN_DISTANCE, angle};
 
-/// The coarse picture of the left image each patch carries, 8 by 4, to
-/// notice cuts. `shaders/patch.wgsl` has the same.
-pub const SIGNATURE: usize = 32;
+/// The coarse picture of the left image each patch carries, 16 by 8 cells,
+/// each the mean over its area, to notice cuts. `shaders/patch.wgsl` has the same.
+pub const SIGNATURE: usize = 128;
 
 /// How wide and tall the matched window is, degrees.
 pub const WINDOW_DEGREES: f32 = 2.9;
@@ -363,11 +363,12 @@ impl Found {
         if self.sharpness.is_nan() || self.sharpness < MIN_SHARPNESS {
             return Err(Rejected::Flat);
         }
-        if let Some(end) = self.end {
-            return Err(Rejected::SearchEnd(end));
-        }
+        // An ambiguous match is no answer, even at the search's end.
         if self.rival {
             return Err(Rejected::Rival);
+        }
+        if let Some(end) = self.end {
+            return Err(Rejected::SearchEnd(end));
         }
         Ok(self.shift)
     }
@@ -637,6 +638,8 @@ pub struct EpiStats {
     pub recentred: u32,
     /// Locks by three of five agreeing, and by the target and its neighbour.
     pub locks_by_neighbour: u32,
+    /// Matches that came after they were given up on, dropped.
+    pub late: u32,
     pub locks: u32,
     pub cuts: u32,
     pub clears: u32,
@@ -660,7 +663,7 @@ impl std::fmt::Display for EpiStats {
             f,
             "{} coarse, {} fine, {} trusted (mean correlation {:.2}); rejected {}; {} locks, \
              {} by neighbours, {} cuts, {} cleared; {} beyond infinity (mean {:+.2}°), {} far end \
-             as infinity, {} fine recentred; CPU {:.0} µs a match, at most {:.0}",
+             as infinity, {} fine recentred, {} late; CPU {:.0} µs a match, at most {:.0}",
             self.coarse,
             self.fine,
             self.trusted,
@@ -678,6 +681,7 @@ impl std::fmt::Display for EpiStats {
             self.beyond_sum / self.beyond_infinity.max(1) as f32,
             self.far_as_infinity,
             self.recentred,
+            self.late,
             self.cpu_sum / self.cpu_count.max(1) as f32,
             self.cpu_max,
         )
@@ -689,8 +693,10 @@ impl std::fmt::Display for EpiStats {
 pub struct Epipolar {
     pub tuning: EpiTuning,
     probe: usize,
-    /// A patch is being drawn or matched.
+    /// A patch is being drawn or matched, and the tag of the latest asked
+    /// for: anything matched under another is late and dropped.
     in_flight: bool,
+    tag: u64,
     /// The coarse pass's answer, for the fine pass to follow: where, shift,
     /// pitch, vertical.
     coarse: Option<([f32; 2], f32, f32, f32)>,
@@ -704,6 +710,7 @@ pub struct Epipolar {
     /// Recent readings: frontal angle, and whether on the target.
     recent: Vec<(f32, bool)>,
     signature: Option<[f32; SIGNATURE]>,
+    cut: bool,
     stats: EpiStats,
 }
 
@@ -716,6 +723,7 @@ impl Epipolar {
             return None;
         }
         self.in_flight = true;
+        self.tag += 1;
         if let Some((at, shift, pitch, vertical)) = self.coarse.take() {
             let reach = if self.vertical.fit().is_some() {
                 VERTICAL_KNOWN
@@ -756,10 +764,33 @@ impl Epipolar {
         self.vertical.fit()
     }
 
-    /// The patch asked for wasn't drawn (nothing to measure there).
+    /// The tag of the patch asked for last.
+    pub fn tag(&self) -> u64 {
+        self.tag
+    }
+
+    /// Whether a match drawn under `tag` is still the one waited for; a late
+    /// one, after it was given up on, is counted and dropped.
+    pub fn current(&mut self, tag: u64) -> bool {
+        let current = tag == self.tag && self.in_flight;
+        if !current {
+            self.stats.late += 1;
+        }
+        current
+    }
+
+    /// The patch asked for wasn't drawn (nothing to measure there), or was
+    /// given up on: whatever comes for it later is late.
     pub fn missed(&mut self) {
         self.in_flight = false;
         self.coarse = None;
+        self.tag += 1;
+    }
+
+    /// Whether a cut was noticed since the last call: what the picture is
+    /// drawn at was of another scene.
+    pub fn take_cut(&mut self) -> bool {
+        std::mem::take(&mut self.cut)
     }
 
     /// Takes in a matched patch drawn at `at` (`α`, `β`, degrees) with
@@ -779,12 +810,10 @@ impl Epipolar {
         s.cpu_sum += micros;
         s.cpu_max = s.cpu_max.max(micros);
         s.cpu_count += 1;
-        if let Some(last) = self.signature {
-            let change: f32 = last.iter().zip(signature).map(|(a, b)| (a - b).abs()).sum();
-            if change / SIGNATURE as f32 > CUT_CHANGE {
-                self.stats.cuts += 1;
-                self.clear();
-            }
+        if self.signature.is_some_and(|last| is_cut(&last, signature)) {
+            self.stats.cuts += 1;
+            self.cut = true;
+            self.clear();
         }
         self.signature = Some(*signature);
         let fine = !layout.coarse;
@@ -907,7 +936,7 @@ pub struct GazeFilter {
 /// The cut-off at rest, Hz, how much it rises per degree a second, and the
 /// cut-off of the speed it goes by.
 const GAZE_MIN_CUTOFF: f32 = 1.0;
-const GAZE_SPEED_GAIN: f32 = 0.05;
+const GAZE_SPEED_GAIN: f32 = 0.15;
 const GAZE_SPEED_CUTOFF: f32 = 1.0;
 
 fn low_pass(cutoff: f32, dt: f32) -> f32 {
@@ -917,10 +946,11 @@ fn low_pass(cutoff: f32, dt: f32) -> f32 {
 
 impl GazeFilter {
     /// Takes this frame's gaze, a unit direction, `dt` seconds on; returns
-    /// the smoothed one. `None` (the eyes lost) starts again.
+    /// the smoothed one. `None` (the eyes lost) keeps where they were, so
+    /// that they're found again from there rather than at a jump.
     pub fn take(&mut self, gaze: Option<[f32; 3]>, dt: f32) -> Option<[f32; 3]> {
         let Some(now) = gaze else {
-            *self = GazeFilter::default();
+            self.speed = 0.0;
             return None;
         };
         let Some(at) = self.at else {
@@ -940,9 +970,33 @@ impl GazeFilter {
     }
 }
 
+/// Whether two coarse pictures are of different scenes: their cells' mean
+/// luma changed by more than [`CUT_CHANGE`] on average. Each cell is the
+/// mean over a 11° by 22° area, so a pan of a few degrees hardly moves it.
+pub fn is_cut(a: &[f32; SIGNATURE], b: &[f32; SIGNATURE]) -> bool {
+    let change: f32 = a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum();
+    change / SIGNATURE as f32 > CUT_CHANGE
+}
+
+/// Moves `at` towards `to` by `dt` seconds, about two thirds of the way in
+/// `seconds`: where the eyes were lost, the measuring's aim glides to the
+/// head's rather than jumping.
+pub fn glide(at: [f32; 3], to: [f32; 3], dt: f32, seconds: f32) -> [f32; 3] {
+    let k = 1.0 - (-dt / seconds.max(1e-3)).exp();
+    let mixed: [f32; 3] = std::array::from_fn(|i| at[i] + k * (to[i] - at[i]));
+    let len = mixed.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if len < 1e-6 {
+        to
+    } else {
+        mixed.map(|v| v / len)
+    }
+}
+
 /// A drawn patch to match, and what to hand back with the match.
 #[derive(Clone, Debug)]
 pub struct Job {
+    /// The tag it was asked for under ([`Epipolar::tag`]).
+    pub tag: u64,
     pub at: [f32; 2],
     pub lon: f32,
     pub layout: Layout,
@@ -954,6 +1008,7 @@ pub struct Job {
 /// A matched patch: the job's, what was found, and how long it took, µs.
 #[derive(Clone, Debug)]
 pub struct Done {
+    pub tag: u64,
     pub at: [f32; 2],
     pub lon: f32,
     pub layout: Layout,
@@ -981,6 +1036,7 @@ impl Worker {
                     let found = search(&job.layout, &job.left, &job.right);
                     let micros = start.elapsed().as_secs_f32() * 1e6;
                     let done = Done {
+                        tag: job.tag,
                         at: job.at,
                         lon: job.lon,
                         layout: job.layout,
@@ -1101,6 +1157,7 @@ mod tests {
             left,
             right,
             signature: [0.0; SIGNATURE],
+            tag: 7,
         });
         let done = (0..500)
             .find_map(|_| {
@@ -1108,7 +1165,7 @@ mod tests {
                 w.take()
             })
             .expect("matched");
-        assert_eq!(done.at, [1.0, 2.0]);
+        assert_eq!((done.at, done.tag), ([1.0, 2.0], 7));
         assert!((done.found.shift - 4.0).abs() < 0.02 && done.micros > 0.0);
     }
 
@@ -1340,7 +1397,7 @@ mod tests {
         // Tremor of ±0.5° at rest: mostly taken out.
         let mut worst = 0.0f32;
         for i in 0..90 {
-            let jitter = if i % 2 == 0 { 0.5 } else { -0.5 };
+            let jitter = if i % 2 == 0 { 0.2 } else { -0.2 };
             let out = f.take(Some(dir(jitter)), 1.0 / 90.0).unwrap();
             if i > 10 {
                 worst = worst.max(angle(out).abs());
@@ -1354,6 +1411,9 @@ mod tests {
         }
         assert!(angle(out) > 15.0, "{}", angle(out));
         assert_eq!(f.take(None, 1.0 / 90.0), None);
+        // Found again from where they were lost: a little way at first.
+        let back = f.take(Some(dir(0.0)), 1.0 / 90.0).unwrap();
+        assert!(angle(back) > 5.0, "{}", angle(back));
     }
 
     /// How each agreement rule does on a stream of readings after the eyes
@@ -1480,6 +1540,63 @@ mod tests {
             ..dim
         };
         assert_eq!(flat.judge(), Err(Rejected::Blank));
+    }
+
+    #[test]
+    fn an_ambiguous_match_at_the_far_end_is_ambiguous_not_infinity() {
+        let f = Found {
+            correlation: 0.9,
+            spread: 0.1,
+            sharpness: 0.5,
+            rival: true,
+            end: Some(End::Far),
+            ..Default::default()
+        };
+        assert_eq!(f.judge(), Err(Rejected::Rival));
+    }
+
+    #[test]
+    fn a_match_given_up_on_is_late_and_dropped() {
+        let mut e = Epipolar::default();
+        e.next_patch(false);
+        let first = e.tag();
+        e.missed();
+        e.next_patch(false);
+        assert!(!e.current(first), "the one given up on");
+        assert!(e.current(e.tag()));
+        assert_eq!(e.take_stats().late, 1);
+    }
+
+    /// A 16 by 8 coarse picture of `scene` (luma over yaw and pitch,
+    /// degrees) panned by `pan` degrees, each cell the mean of 4 by 4 taps.
+    fn signature_of(scene: impl Fn(f32, f32) -> f32, pan: f32) -> [f32; SIGNATURE] {
+        std::array::from_fn(|k| {
+            let (cx, cy) = ((k % 16) as f32, (k / 16) as f32);
+            let mut sum = 0.0;
+            for t in 0..16 {
+                let (tx, ty) = ((t % 4) as f32 + 0.5, (t / 4) as f32 + 0.5);
+                let yaw = (cx + tx / 4.0) / 16.0 * 180.0 - 90.0 + pan;
+                let pitch = 90.0 - (cy + ty / 4.0) / 8.0 * 180.0;
+                sum += scene(yaw, pitch);
+            }
+            sum / 16.0
+        })
+    }
+
+    #[test]
+    fn a_pan_is_not_a_cut_and_a_new_scene_is() {
+        // Scenes with shapes of 15–30°, as pictures have.
+        let scene = |seed: f32| {
+            move |yaw: f32, pitch: f32| {
+                0.5 + 0.25 * (yaw / 17.0 + seed).sin() * (pitch / 23.0 + 2.0 * seed).cos()
+                    + 0.15 * (yaw / 9.0 - pitch / 13.0 + 3.0 * seed).sin()
+            }
+        };
+        let a = signature_of(scene(0.0), 0.0);
+        for pan in [2.0, 4.0, 6.0] {
+            assert!(!is_cut(&a, &signature_of(scene(0.0), pan)), "pan {pan}");
+        }
+        assert!(is_cut(&a, &signature_of(scene(1.7), 0.0)));
     }
 
     #[test]

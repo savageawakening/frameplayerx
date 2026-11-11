@@ -896,6 +896,7 @@ fn autofocus(
         p.epipolar_waiting = 0;
         match &p.epipolar_worker {
             Some(w) => w.send(Job {
+                tag: patch.tag,
                 at: patch.at,
                 lon: patch.lon,
                 layout: patch.layout,
@@ -907,6 +908,10 @@ fn autofocus(
         }
     }
     while let Some(done) = p.epipolar_worker.as_ref().and_then(Worker::take) {
+        // Late: drawn for a patch given up on since.
+        if !p.epipolar.current(done.tag) {
+            continue;
+        }
         if on_ui {
             // Of where the eyes were before they went to the panel.
             p.epipolar.missed();
@@ -920,6 +925,10 @@ fn autofocus(
             done.micros,
             &done.signature,
         );
+        // A new scene: the depth held was of the last one.
+        if p.epipolar.take_cut() {
+            af.clear();
+        }
         if let Some(angle) = lock
             && settled
         {
@@ -934,13 +943,17 @@ fn autofocus(
             p.epipolar.missed();
         }
     }
-    let ahead = gaze.or(input.head.map(|(_, rot)| rot * Vec3::NEG_Z));
+    // With the eyes lost, the aim glides to where the head faces rather than
+    // jumping there, and back to the eyes the same way when they return.
+    let head = input.head.map(|(_, rot)| rot * Vec3::NEG_Z);
+    let ahead = aim(&mut p.autofocus_aim, gaze, head, input.dt);
     if settled
         && frame.is_some()
         && let Some(ahead) = ahead
         && let Some((aim, layout)) = p.epipolar.next_patch(gaze.is_some())
     {
         video.patch = Some(fp_render::patch::PatchAsk {
+            tag: p.epipolar.tag(),
             ray: ahead,
             aim,
             layout,
@@ -954,6 +967,35 @@ fn autofocus(
         .map(|distance| fp_render::Focus { distance, baseline });
 }
 
+/// How long the aim takes to glide to the head when the eyes are lost, and
+/// back to the eyes when they return.
+const AIM_TO_HEAD: f32 = 0.5;
+const AIM_TO_EYES: f32 = 0.15;
+
+/// Where autofocus measures: the eyes, or with them lost the head, reached by
+/// gliding from wherever the aim was so a lost or regained gaze doesn't jump.
+fn aim(at: &mut playback::Aim, gaze: Option<Vec3>, head: Option<Vec3>, dt: f32) -> Option<Vec3> {
+    let (to, seconds) = match (gaze, head) {
+        (Some(g), _) => (g, AIM_TO_EYES),
+        (None, Some(h)) => (h, AIM_TO_HEAD),
+        (None, None) => return at.dir,
+    };
+    let next = match at.dir {
+        // Following the eyes, it follows them exactly.
+        Some(_) if gaze.is_some() && !at.regaining => to,
+        Some(d) => Vec3::from_array(fp_core::epipolar::glide(
+            d.to_array(),
+            to.to_array(),
+            dt,
+            seconds,
+        )),
+        None => to,
+    };
+    at.regaining = gaze.is_none() || (at.regaining && next.angle_between(to) > 0.5f32.to_radians());
+    at.dir = Some(next);
+    at.dir
+}
+
 /// Whether the eyes' gaze from `at` meets any panel that shows.
 fn gaze_hits<'a>(panels: impl Iterator<Item = &'a Panel>, at: Vec3, gaze: Vec3) -> bool {
     panels
@@ -964,6 +1006,31 @@ fn gaze_hits<'a>(panels: impl Iterator<Item = &'a Panel>, at: Vec3, gaze: Vec3) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_the_eyes_lost_the_aim_glides_to_the_head_and_back() {
+        let mut at = playback::Aim::default();
+        let eyes = Vec3::new(0.5, 0.0, -1.0).normalize();
+        let head = Vec3::NEG_Z;
+        assert_eq!(aim(&mut at, Some(eyes), Some(head), 0.011), Some(eyes));
+        // Lost: one frame later it has moved only a little towards the head.
+        let first = aim(&mut at, None, Some(head), 0.011).unwrap();
+        assert!(first.angle_between(eyes) > 0.0);
+        assert!(first.angle_between(eyes).to_degrees() < 2.0);
+        for _ in 0..400 {
+            aim(&mut at, None, Some(head), 0.011);
+        }
+        assert!(at.dir.unwrap().angle_between(head).to_degrees() < 0.1);
+        // Back: it doesn't jump to the eyes, but reaches them and then
+        // follows them exactly.
+        let back = aim(&mut at, Some(eyes), Some(head), 0.011).unwrap();
+        assert!(back.angle_between(eyes).to_degrees() > 10.0);
+        for _ in 0..100 {
+            aim(&mut at, Some(eyes), Some(head), 0.011);
+        }
+        let moved = Vec3::new(0.4, 0.1, -1.0).normalize();
+        assert_eq!(aim(&mut at, Some(moved), Some(head), 0.011), Some(moved));
+    }
 
     #[test]
     fn the_gaze_on_a_panel_that_shows_is_on_the_ui() {

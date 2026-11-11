@@ -307,6 +307,7 @@ adjust-autofocus = オートフォーカス
 adjust-autofocus-desc = 目の間隔にかかわらず、見ているものを本来の奥行きで表示します。
 adjust-depth = 奥行き
 adjust-depth-desc = 左右の目の間隔。像が重なりにくいときは下げてください。
+adjust-depth-autofocus-desc = オートフォーカスがオンのときは適用されません。オートフォーカスが見ているものの奥行きを合わせます。
 adjust-vertical-align = 上下の位置合わせ
 adjust-rotation-align = 回転の位置合わせ
 adjust-swap-eyes = 左右を入れ替え

@@ -616,8 +616,13 @@ while you look at the menus.
 
 It's offered for 180° side-by-side videos, 8-bit or 10-bit, and stays on for
 those until you turn it off; off, the picture is drawn exactly as without it.
-**Depth** still works on top of it. It uses a little of the headset's
-graphics power while it's on, and none while it's off.
+**Depth** doesn't apply while it's on, since autofocus already sets the
+distance of what you look at for where your eyes really are, and a depth
+offset would only pull it off that again; **Vertical align** and **Rotation
+align** still do. When you look away to something new it glides there faster
+the farther it has to go, and a cut to a new scene starts it measuring
+afresh. It uses a little of the headset's graphics power while it's on, and
+none while it's off.
 
 ### Fisheye lenses
 

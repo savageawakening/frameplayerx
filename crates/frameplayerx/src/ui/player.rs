@@ -1573,6 +1573,9 @@ pub(super) fn stereo_tab(
 ) {
     let d = ViewSettings::default();
     widgets::rows(ui, |r| {
+        // While autofocus draws, the depth offset is left out (see
+        // `params::build`): say so rather than have it seem broken.
+        let focusing = autofocus.as_deref().copied().unwrap_or(false);
         if let Some(on) = autofocus {
             r.switch(
                 tr!("adjust-autofocus"),
@@ -1582,7 +1585,11 @@ pub(super) fn stereo_tab(
         }
         r.slider(
             tr!("adjust-depth"),
-            Some(tr!("adjust-depth-desc")),
+            Some(if focusing {
+                tr!("adjust-depth-autofocus-desc")
+            } else {
+                tr!("adjust-depth-desc")
+            }),
             &mut s.ipd_offset,
             -5.0..=5.0,
             0.0,
