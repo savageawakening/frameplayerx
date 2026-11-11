@@ -139,7 +139,21 @@ fn off_centre(d: vec3<f32>, p: vec3<f32>, r: f32) -> vec3<f32> {
 fn focused(d: vec3<f32>, eye: u32, s: f32) -> vec3<f32> {
     let at = params.viewer.xyz + params.eyes[eye].xyz;
     let camera = vec3<f32>(s * params.focus.y, 0.0, 0.0);
-    return off_centre(d, (params.correction * vec4<f32>(at, 0.0)).xyz - camera, params.focus.x);
+    let p = (params.correction * vec4<f32>(at, 0.0)).xyz - camera;
+    return off_centre(d, softly_inside(p, params.focus.x), params.focus.x);
+}
+
+// `p` kept inside 0.9 of the radius `r` smoothly: exactly as it is up to
+// half that, then easing towards the limit rather than stopping at it, so
+// that leaning towards a near focus, or a focus easing nearer, slows the
+// picture's slide instead of halting it at once.
+fn softly_inside(p: vec3<f32>, r: f32) -> vec3<f32> {
+    let len = length(p);
+    let limit = 0.9 * r;
+    let knee = 0.5 * limit;
+    if (len <= knee || limit <= 0.0) { return p; }
+    let room = limit - knee;
+    return p * ((knee + room * tanh((len - knee) / room)) / len);
 }
 
 // Ray (forward = -Z, right = +X, up = +Y) to normalised video coordinates

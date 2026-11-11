@@ -361,6 +361,18 @@ pub(crate) fn off_centre(d: Vec3, p: Vec3, r: f32) -> Vec3 {
     (q + t * d).normalize()
 }
 
+/// Mirrors `softly_inside` in shaders/scene.wgsl.
+pub(crate) fn softly_inside(p: Vec3, r: f32) -> Vec3 {
+    let len = p.length();
+    let limit = 0.9 * r;
+    let knee = 0.5 * limit;
+    if len <= knee || limit <= 0.0 {
+        return p;
+    }
+    let room = limit - knee;
+    p * ((knee + room * ((len - knee) / room).tanh()) / len)
+}
+
 /// Mirrors `zoom_dir` in shaders/scene.wgsl.
 pub(crate) fn zoom_dir(d: Vec3, zoom: f32) -> Vec3 {
     let r = d.truncate().length();
@@ -386,7 +398,8 @@ pub(crate) fn video_dir(p: &SceneParams, ray: Vec3, eye: usize) -> Vec3 {
     d = if p.focus.x > 0.0 {
         let at = p.viewer.xyz() + p.eyes[eye].xyz();
         let camera = Vec3::new(s * p.focus.y, 0.0, 0.0);
-        off_centre(d, p.correction.transform_vector3(at) - camera, p.focus.x)
+        let offset = softly_inside(p.correction.transform_vector3(at) - camera, p.focus.x);
+        off_centre(d, offset, p.focus.x)
     } else {
         off_centre(
             d,
@@ -727,6 +740,26 @@ mod tests {
         assert!(p.eyes.iter().all(|e| e.length() <= MAX_EYE_OFFSET + 1e-6));
         for eye in 0..2 {
             assert!(video_dir(&p, Vec3::X, eye).is_finite());
+        }
+    }
+
+    #[test]
+    fn leaning_towards_a_near_focus_slows_smoothly_rather_than_stopping() {
+        let r = 0.3;
+        let at = |x: f32| softly_inside(Vec3::new(x, 0.0, 0.0), r).x;
+        // Exactly as it is up to half the limit: where the eyes are.
+        assert_eq!(at(0.1), 0.1);
+        // Never past the limit, and no corner: the slope falls smoothly.
+        let mut last_slope = 1.0f32;
+        let h = 1e-3;
+        let mut x = 0.0;
+        while x < 2.0 {
+            let slope = (at(x + h) - at(x)) / h;
+            assert!(at(x) < 0.9 * r + 1e-5);
+            assert!(slope <= last_slope + 1e-3 && slope >= -1e-3, "{x}: {slope}");
+            assert!((last_slope - slope).abs() < 0.02, "a corner at {x}");
+            last_slope = slope;
+            x += h;
         }
     }
 
