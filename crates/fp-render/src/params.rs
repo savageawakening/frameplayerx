@@ -5,7 +5,7 @@ use fp_core::view::ViewSettings;
 use fp_media::PixelLayout;
 use fp_media::frame::{ColorInfo, Matrix};
 use fp_media::info::Transfer;
-use glam::{EulerRot, Mat4, Quat, Vec4};
+use glam::{EulerRot, Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
 
 /// Matches `struct Params` in shaders/scene.wgsl (std140-compatible: every
 /// member is 16-byte aligned).
@@ -37,6 +37,8 @@ pub(crate) struct SceneParams {
     pub hdr: Vec4,
     pub tp10: Vec4,
     pub tp10_uv: Vec4,
+    pub focus: Vec4,
+    pub eyes: [Vec4; 2],
 }
 
 /// Sets `p` up for a Q10C picture of `height` rows sampled where it lies
@@ -89,7 +91,27 @@ pub struct VideoParams {
     /// Width of a video pixel relative to its height: anamorphic video is
     /// shown this much wider than it is stored.
     pub pixel_aspect: f32,
+    /// Autofocus: how far away the picture is taken to be, for a 180°/360°
+    /// video. `None` draws it as it always has been.
+    pub focus: Option<Focus>,
+    /// Autofocus: where to measure the picture's depth this frame, read back
+    /// with [`crate::Renderer::disparity_reading`].
+    pub measure: Option<crate::disparity::Measure>,
 }
+
+/// The depth autofocus draws a 180°/360° picture at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Focus {
+    /// From the cameras to what the eyes are on, metres; no nearer than
+    /// [`MIN_FOCUS_DISTANCE`].
+    pub distance: f32,
+    /// How far apart the cameras were, metres.
+    pub baseline: f32,
+}
+
+/// The nearest the picture is drawn, metres: nearer, the sphere is smaller
+/// than the viewer's eyes can be kept well inside.
+pub const MIN_FOCUS_DISTANCE: f32 = 0.1;
 
 impl Default for VideoParams {
     fn default() -> Self {
@@ -101,6 +123,8 @@ impl Default for VideoParams {
             anchor: Quat::IDENTITY,
             rotation: 0,
             pixel_aspect: 1.0,
+            focus: None,
+            measure: None,
         }
     }
 }
@@ -284,7 +308,76 @@ pub(crate) fn build(
         hdr: hdr_levels(crate::hdr::DEFAULT_PEAK),
         tp10: Vec4::ZERO,
         tp10_uv: Vec4::ZERO,
+        focus: match video.focus {
+            Some(f) if kind != 0 => Vec4::new(
+                f.distance.max(MIN_FOCUS_DISTANCE),
+                f.baseline.max(0.0),
+                0.0,
+                0.0,
+            ),
+            _ => Vec4::ZERO,
+        },
+        eyes: [Vec4::ZERO; 2],
     }
+}
+
+/// Sets where each eye is from the middle of the head, from the eyes' world
+/// positions, in the room frame of `anchor`: what autofocus draws from.
+pub(crate) fn place_eyes(p: &mut SceneParams, anchor: Quat, eyes: [Vec3; 2]) {
+    let middle = 0.5 * (eyes[0] + eyes[1]);
+    p.eyes = eyes.map(|e| (anchor.inverse() * (e - middle)).extend(0.0));
+}
+
+/// The world-space position of the eye a view is from.
+pub(crate) fn eye_position(view: Mat4) -> Vec3 {
+    view.inverse().w_axis.xyz()
+}
+
+/// Mirrors `off_centre` in shaders/scene.wgsl.
+pub(crate) fn off_centre(d: Vec3, p: Vec3, r: f32) -> Vec3 {
+    if p.length_squared() < 1e-8 {
+        return d;
+    }
+    let q = p * (0.9 * r / p.length()).min(1.0);
+    let b = q.dot(d);
+    let t = -b + (b * b - q.length_squared() + r * r).sqrt();
+    (q + t * d).normalize()
+}
+
+/// Mirrors `zoom_dir` in shaders/scene.wgsl.
+pub(crate) fn zoom_dir(d: Vec3, zoom: f32) -> Vec3 {
+    let r = d.truncate().length();
+    if (zoom - 1.0).abs() < 1e-4 || r < 1e-6 {
+        return d;
+    }
+    let theta = (-d.z).clamp(-1.0, 1.0).acos();
+    let t = (theta / zoom).min(std::f32::consts::PI);
+    (d.truncate() / r * t.sin()).extend(-t.cos())
+}
+
+/// Mirrors the spherical path of `fs_main` in shaders/scene.wgsl: the
+/// direction in the video, from its camera, that eye `eye` sees along the
+/// world-space `ray`.
+#[cfg(test)]
+pub(crate) fn video_dir(p: &SceneParams, ray: Vec3, eye: usize) -> Vec3 {
+    let s = if eye == 1 { 0.5 } else { -0.5 };
+    let mut d = p.anchor_inv.transform_vector3(ray);
+    d = Mat4::from_rotation_y(p.proj.w * s).transform_vector3(d);
+    d = Mat4::from_rotation_x(p.lens.z * s).transform_vector3(d);
+    d = Mat4::from_rotation_z(p.lens.w * s).transform_vector3(d);
+    d = p.correction.transform_vector3(d).normalize();
+    d = if p.focus.x > 0.0 {
+        let at = p.viewer.xyz() + p.eyes[eye].xyz();
+        let camera = Vec3::new(s * p.focus.y, 0.0, 0.0);
+        off_centre(d, p.correction.transform_vector3(at) - camera, p.focus.x)
+    } else {
+        off_centre(
+            d,
+            p.correction.transform_vector3(p.viewer.xyz()),
+            p.viewer.w,
+        )
+    };
+    zoom_dir(d, p.proj.z)
 }
 
 /// Chroma (BT.709 Cb, Cr) of an sRGB-encoded colour, as the shader computes it
@@ -302,7 +395,7 @@ mod tests {
     use super::*;
 
     fn apply(rows: &[Vec4; 3], off: Vec4, yuv: [f32; 3]) -> [f32; 3] {
-        let v = glam::Vec3::new(yuv[0], yuv[1], yuv[2]) * off.w - off.truncate();
+        let v = Vec3::new(yuv[0], yuv[1], yuv[2]) * off.w - off.truncate();
         [
             rows[0].truncate().dot(v),
             rows[1].truncate().dot(v),
@@ -439,6 +532,180 @@ mod tests {
         assert!(near(screen(180, 1.0), (6.0, 3.375, 2)));
         // 4:3 pixels widen a 16:9 frame to 2.37:1.
         assert!(near(screen(0, 4.0 / 3.0), (6.0, 6.0 * 1080.0 / 2560.0, 0)));
+    }
+
+    /// A 180° video with `focus`, seen by eyes `ipd` apart, the picture
+    /// turned by `yaw` degrees and recentred to `anchor`.
+    fn focused_params(focus: Option<Focus>, ipd: f32, yaw: f32, anchor: Quat) -> SceneParams {
+        let video = VideoParams {
+            format: VideoFormat::new(Projection::EQUIRECT_180, StereoLayout::SideBySide),
+            settings: ViewSettings {
+                yaw,
+                ..Default::default()
+            },
+            anchor,
+            focus,
+            ..Default::default()
+        };
+        let mut p = build(&video, None, [Mat4::IDENTITY; 2]);
+        // The eyes' world positions: across the video's own x axis, wherever
+        // the head is.
+        let to_world = anchor * Quat::from_mat4(&p.correction).inverse();
+        let head = Vec3::new(0.3, 1.6, -0.2);
+        let eyes = [-0.5, 0.5].map(|s| head + to_world * Vec3::new(s * ipd, 0.0, 0.0));
+        place_eyes(&mut p, anchor, eyes);
+        p
+    }
+
+    /// Within a hundredth of a millimetre at a metre.
+    fn close(a: Vec3, b: Vec3) -> bool {
+        (a.normalize() - b.normalize()).length() < 1e-5
+    }
+
+    #[test]
+    fn a_point_at_the_focus_distance_is_seen_where_it_really_is() {
+        let anchor = Quat::from_rotation_y(0.7);
+        for (ipd, baseline) in [(0.064, 0.064), (0.058, 0.064), (0.072, 0.060), (0.064, 0.0)] {
+            for distance in [0.1, 0.35, 1.0, 4.0, 40.0] {
+                for yaw in [0.0, 25.0] {
+                    let focus = Focus { distance, baseline };
+                    let p = focused_params(Some(focus), ipd, yaw, anchor);
+                    let to_world = anchor * Quat::from_mat4(&p.correction).inverse();
+                    for eye in 0..2 {
+                        let s = if eye == 1 { 0.5 } else { -0.5 };
+                        let camera = Vec3::new(s * baseline, 0.0, 0.0);
+                        let viewer = Vec3::new(s * ipd, 0.0, 0.0);
+                        for (lon, lat) in
+                            [(0.0f32, 0.0f32), (30.0, 10.0), (-60.0, -35.0), (5.0, 70.0)]
+                        {
+                            let (lon, lat) = (lon.to_radians(), lat.to_radians());
+                            let towards =
+                                Vec3::new(lat.cos() * lon.sin(), lat.sin(), -lat.cos() * lon.cos());
+                            // On the sphere around this eye's camera.
+                            let point = camera + distance * towards;
+                            let ray = to_world * (point - viewer).normalize();
+                            let seen = video_dir(&p, ray, eye);
+                            assert!(
+                                close(seen, towards),
+                                "ipd {ipd} baseline {baseline} at {distance} m, eye {eye}: \
+                                 {seen} for {towards}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eyes_where_the_cameras_were_see_what_they_always_did() {
+        let anchor = Quat::from_rotation_y(-0.4);
+        let off = focused_params(None, 0.064, 10.0, anchor);
+        for distance in [0.1, 1.0, 10.0] {
+            let focus = Focus {
+                distance,
+                baseline: 0.064,
+            };
+            let on = focused_params(Some(focus), 0.064, 10.0, anchor);
+            for eye in 0..2 {
+                for ray in [Vec3::NEG_Z, Vec3::new(0.5, 0.3, -1.0).normalize()] {
+                    assert!(close(video_dir(&on, ray, eye), video_dir(&off, ray, eye)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn without_focus_nothing_changes() {
+        let video = VideoParams {
+            format: VideoFormat::new(Projection::EQUIRECT_180, StereoLayout::SideBySide),
+            ..Default::default()
+        };
+        let p = build(&video, None, [Mat4::IDENTITY; 2]);
+        assert_eq!(p.focus, Vec4::ZERO);
+        // Off means the shader takes upstream's call as it was: the viewer's
+        // offset from the sphere's centre, on the 3 m sphere.
+        let mut q = focused_params(None, 0.07, 0.0, Quat::IDENTITY);
+        q.viewer = Vec3::new(0.0, 0.2, -0.5).extend(SPHERE_RADIUS);
+        let ray = Vec3::new(0.2, -0.1, -1.0).normalize();
+        let upstream = zoom_dir(
+            off_centre(
+                q.correction.transform_vector3(ray).normalize(),
+                q.correction.transform_vector3(q.viewer.xyz()),
+                q.viewer.w,
+            ),
+            q.proj.z,
+        );
+        for eye in 0..2 {
+            assert_eq!(video_dir(&q, ray, eye), upstream);
+        }
+        // A flat screen has no sphere to put a focus on.
+        let flat = VideoParams {
+            focus: Some(Focus {
+                distance: 1.0,
+                baseline: 0.064,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(build(&flat, None, [Mat4::IDENTITY; 2]).focus, Vec4::ZERO);
+    }
+
+    #[test]
+    fn the_focus_is_never_nearer_than_a_tenth_of_a_metre() {
+        let p = focused_params(
+            Some(Focus {
+                distance: 0.01,
+                baseline: 0.064,
+            }),
+            0.064,
+            0.0,
+            Quat::IDENTITY,
+        );
+        assert_eq!(p.focus.x, MIN_FOCUS_DISTANCE);
+    }
+
+    #[test]
+    fn the_viewer_stays_well_inside_a_near_sphere() {
+        let mut p = focused_params(
+            Some(Focus {
+                distance: 0.1,
+                baseline: 0.064,
+            }),
+            0.064,
+            0.0,
+            Quat::IDENTITY,
+        );
+        // Leaning a metre forward with the picture only 10 cm away.
+        p.viewer = Vec3::new(0.0, 0.0, -1.0).extend(SPHERE_RADIUS);
+        for ray in [
+            Vec3::NEG_Z,
+            Vec3::Z,
+            Vec3::X,
+            Vec3::new(0.3, 0.9, 0.1).normalize(),
+        ] {
+            let d = video_dir(&p, ray, 0);
+            assert!(d.is_finite() && (d.length() - 1.0).abs() < 1e-4, "{d}");
+        }
+    }
+
+    #[test]
+    fn eyes_are_placed_from_the_middle_of_the_head_in_the_room_frame() {
+        let mut p = build(&VideoParams::default(), None, [Mat4::IDENTITY; 2]);
+        let anchor = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        // Eyes 64 mm apart along world -z: the room's x after a quarter turn.
+        let head = Vec3::new(1.0, 1.7, 2.0);
+        place_eyes(
+            &mut p,
+            anchor,
+            [
+                head + Vec3::new(0.0, 0.0, 0.032),
+                head - Vec3::new(0.0, 0.0, 0.032),
+            ],
+        );
+        assert!((p.eyes[0].xyz() - Vec3::new(-0.032, 0.0, 0.0)).length() < 1e-6);
+        assert!((p.eyes[1].xyz() - Vec3::new(0.032, 0.0, 0.0)).length() < 1e-6);
+        let view = Mat4::from_rotation_y(0.3).inverse() * Mat4::from_translation(-head);
+        assert!((eye_position(view) - head).length() < 1e-5);
     }
 
     #[test]

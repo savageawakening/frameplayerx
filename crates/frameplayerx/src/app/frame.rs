@@ -580,7 +580,8 @@ impl App {
         }
         let anchor_rot = anchor.to_scale_rotation_translation().1;
         let player = self.picture_anchor(anchor);
-        if let (Some(p), Some(s)) = (&self.playback, shown) {
+        let reading = renderer.disparity_reading();
+        if let (Some(p), Some(s)) = (&mut self.playback, shown) {
             frame = p.player.current_frame();
             video.format = p.format;
             video.screen_pose = place(player, 0.0, s.screen_distance, 0.0, 0.0);
@@ -590,6 +591,14 @@ impl App {
                 video.rotation = v.rotation;
                 video.pixel_aspect = v.pixel_aspect as f32;
             }
+            autofocus(
+                p,
+                self.settings.autofocus,
+                frame.as_ref(),
+                &mut video,
+                input,
+                reading,
+            );
             if let Some((_, rot)) = input.head {
                 let rel = anchor_rot.inverse() * rot;
                 p.player.set_head_orientation(rel.to_array());
@@ -818,9 +827,94 @@ fn perf_video(
     })
 }
 
+/// Autofocus for this frame: takes in what was measured, asks for the next
+/// window around where the eyes look (else where the head faces), and draws
+/// the picture at the distance it has eased to. Off, or for a video it can't
+/// measure, the picture is drawn as without it, at once.
+fn autofocus(
+    p: &mut Playback,
+    on: bool,
+    frame: Option<&Arc<VideoFrame>>,
+    video: &mut VideoParams,
+    input: &FrameInput,
+    reading: Option<fp_core::autofocus::Reading>,
+) {
+    let af = &mut p.autofocus;
+    let measurable = frame
+        .is_some_and(|f| fp_render::disparity::measurable(&video.format, video.rotation, f.layout));
+    if !on || !measurable {
+        af.off();
+        p.autofocus_at = None;
+        return;
+    }
+    // A seek: what was measured was of another part of the video.
+    if let Some(f) = frame {
+        if p.autofocus_at
+            .is_some_and(|t| f.pts < t - 0.05 || f.pts > t + 1.0)
+        {
+            af.clear();
+        }
+        p.autofocus_at = Some(f.pts);
+    }
+    let settled = af.look(input.gaze.map(|g| g.to_array()), input.dt);
+    if let Some(r) = reading {
+        af.measured(&r);
+    }
+    if af.due() {
+        let ahead = input.gaze.or(input.head.map(|(_, rot)| rot * Vec3::NEG_Z));
+        match (settled, ahead) {
+            (true, Some(ahead)) => {
+                let (tag, [right, up]) = af.next_near();
+                let up_axis = input.head.map_or(Vec3::Y, |(_, rot)| rot * Vec3::Y);
+                video.measure = Some(fp_render::disparity::Measure {
+                    ray: near_gaze(ahead, up_axis, right, up),
+                    vertical: af.vertical_offset(),
+                    prefilter: af.tuning.prefilter,
+                    centre: 0.0,
+                    tag,
+                });
+            }
+            (false, _) => af.eyes_moving(),
+            _ => {}
+        }
+    }
+    let baseline = af.tuning.baseline;
+    video.focus = af
+        .advance(input.dt)
+        .map(|distance| fp_render::Focus { distance, baseline });
+}
+
+/// A direction `right` and `up` degrees from `ahead`, turning about `up_axis`
+/// (where the head's up is) and then about the axis across both.
+fn near_gaze(ahead: Vec3, up_axis: Vec3, right: f32, up: f32) -> Vec3 {
+    let across = ahead.cross(up_axis).try_normalize().unwrap_or(Vec3::X);
+    let turned = Quat::from_axis_angle(up_axis.normalize(), -right.to_radians()) * ahead;
+    Quat::from_axis_angle(across, up.to_radians()) * turned
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_near_the_gaze_are_turned_from_it_as_asked() {
+        let ahead = Vec3::NEG_Z;
+        assert!((near_gaze(ahead, Vec3::Y, 0.0, 0.0) - ahead).length() < 1e-6);
+        let right = near_gaze(ahead, Vec3::Y, 3.0, 0.0);
+        assert!(right.x > 0.0 && (right.angle_between(ahead).to_degrees() - 3.0).abs() < 1e-3);
+        let up = near_gaze(ahead, Vec3::Y, 0.0, 3.0);
+        assert!(up.y > 0.0 && (up.angle_between(ahead).to_degrees() - 3.0).abs() < 1e-3);
+        // With the head tilted, "up" is the head's.
+        let tilted = Quat::from_rotation_z(0.5) * Vec3::Y;
+        let up = near_gaze(ahead, tilted, 0.0, 3.0);
+        assert!(
+            (up.normalize()
+                - (Quat::from_rotation_z(0.5) * Vec3::new(0.0, 0.0523, -0.9986)).normalize())
+            .length()
+                < 1e-3,
+            "{up}"
+        );
+    }
 
     #[test]
     fn a_toast_sits_above_the_bar_and_any_picker() {

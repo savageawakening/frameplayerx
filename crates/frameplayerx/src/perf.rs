@@ -524,9 +524,10 @@ impl GpuWindow {
             at(&total, 1.0),
             total.len()
         );
-        let parts: [(&str, Part); 4] = [
+        let parts: [(&str, Part); 5] = [
             ("video", |t| t.video),
             ("eyes", |t| t.eyes),
+            ("autofocus", |t| t.autofocus),
             ("panels", |t| t.panels),
             ("layers", |t| t.layers),
         ];
@@ -568,6 +569,7 @@ mod tests {
                 panels: Some(0.1),
                 video: (i % 2 == 0).then_some(1.0),
                 eyes: Some(3.0 + i as f32 / 10.0),
+                autofocus: (i % 4 == 0).then_some(0.2),
                 layers: None,
                 total: Some(4.0 + i as f32 / 10.0),
             }));
@@ -577,7 +579,7 @@ mod tests {
         assert!(
             line.starts_with(
                 "frame GPU ms: median 4.9, 95% 5.8, max 5.9 over 20 frames; \
-                 medians video 1.00, eyes 3.90, panels 0.10"
+                 medians video 1.00, eyes 3.90, autofocus 0.20, panels 0.10"
             ),
             "{line}"
         );

@@ -166,6 +166,38 @@ as bytes, so this pipeline takes all its descriptors from descriptor
 buffers, the scene's parameters included. HDR 10-bit frames are still
 converted, as their scenes are measured in the converted planes.
 
+**Autofocus.** The projection shader can draw a 180°/360° picture as if
+painted on a sphere around each eye's camera (`±baseline/2` along the
+video's x axis) at the focus distance, seen from where that eye really is
+(`VideoParams::focus`; `focused` in `shaders/scene.wgsl`, the same
+`off_centre` the viewer's height uses): what is at that distance then lands
+where it really was whatever the viewer's IPD, and with the eyes where the
+cameras were nothing changes. Without a focus the shader takes its old call,
+so the picture is exactly as before. The eyes' positions come from the eye
+views; `params.rs` mirrors the shader for the tests.
+
+A frame that asks (`VideoParams::measure`) runs a compute pass after the eye
+passes, through the frame as the eyes read it: the scene's descriptor set
+for planes, or the TP10 descriptors for a Q10C picture sampled in place
+(`shaders/disparity_planes.wgsl`, `disparity_tp10.wgsl`; the shader is built
+after `planes*.wgsl` for their `luma_at`). `fp-render/src/disparity.rs` maps
+the ray, from the eyes' gaze where they're tracked and the head otherwise,
+to a window half of each shift either side of it in both images, and
+`shaders/disparity.wgsl` correlates the luma and its differences at 256
+shifts (to 0.1 m), each sample the mean of four taps; then, at the best
+shift, 23 vertical shifts of ±2° by the differences down the window; and a
+coarse 8×4 picture of the left image. The result comes back when the frame's
+slot does. `fp_core::autofocus` judges it (low detail, search end, score,
+flat curve, a rival peak), votes the depth most of nine windows around the
+gaze support once the eyes have settled, moves the focus when three of five
+agree, learns the rig's vertical offset from clear matches that agree (trying
+0, ±1 and ±2° until they do) and searches at it, forgets its readings on a
+seek or a cut, and eases the drawn distance in vergence at a rate with
+acceleration. Distance comes from the disparity in longitude, the window's
+longitude and its latitude, so a subject reads the same anywhere in the
+picture. The log has an `autofocus:` line every 10 s with what stopped
+readings and the vertical offset, and the GPU line an `autofocus` part.
+
 **Sources and browsing.** Every source implements one `Source` trait
 (`list`, `open`, `details`). Each kind gets its own browser in `ui/`:
 `local.rs`, `folders.rs`, `catalog.rs` and `feeds.rs`, built from the

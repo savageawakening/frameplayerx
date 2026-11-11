@@ -95,6 +95,7 @@ impl Sim {
                 time: self.start.elapsed().as_secs_f64(),
                 dt,
                 head,
+                gaze: self.gaze.map(|g| self.head * g * Vec3::NEG_Z),
                 hands,
                 passthrough_available: true,
                 layers: false,

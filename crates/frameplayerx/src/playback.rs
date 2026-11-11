@@ -5,6 +5,7 @@ use crate::services::Opener;
 use crate::settings::Settings;
 use crate::subtitles::{self, Pick};
 use crate::watch::{Reports, Watch};
+use fp_core::autofocus::Autofocus;
 use fp_core::format::{self, ContainerHints, DetectedFormat, Evidence, VideoFormat};
 use fp_core::source::{Entry, EntryKind, SubtitleFile};
 use fp_core::sync::lock;
@@ -96,6 +97,11 @@ pub struct Playback {
     pub detected: DetectedFormat,
     pub settings: ViewSettings,
     pub keyframes: Keyframes,
+    /// How far away autofocus draws the picture; never saved.
+    pub autofocus: Autofocus,
+    /// The time of the frame autofocus last saw, to forget its readings on
+    /// a seek.
+    pub autofocus_at: Option<f64>,
     /// Adjustments differ from what is saved for this video.
     pub settings_dirty: bool,
     /// What is saved for this video (the Passthrough tab saves its part
@@ -707,6 +713,8 @@ pub fn open(
             backdrop,
             colour_open: !settings_v.own_key(),
             keyframes,
+            autofocus: Autofocus::default(),
+            autofocus_at: None,
             settings_dirty: false,
             heatmap,
             markers,

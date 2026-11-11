@@ -13,10 +13,12 @@ pub(crate) enum Mark {
     VideoDone,
     Eyes,
     EyesDone,
+    /// Autofocus's measurement, after the eye passes.
+    MeasureDone,
     End,
 }
 
-const MARKS: usize = 6;
+const MARKS: usize = 7;
 
 /// One frame's GPU time per part, in milliseconds. A part the frame didn't
 /// have (no video, no eye passes) is `None`.
@@ -28,6 +30,8 @@ pub struct GpuTimes {
     pub video: Option<f32>,
     /// Both eye passes.
     pub eyes: Option<f32>,
+    /// Autofocus measuring the picture's depth, on the frames that do.
+    pub autofocus: Option<f32>,
     /// Copying panels into the compositor's layers.
     pub layers: Option<f32>,
     /// The whole frame.
@@ -50,7 +54,10 @@ fn parts(ticks: [Option<u64>; MARKS], bits: u32, period_ns: f32) -> GpuTimes {
         panels: ms(Mark::Start, Mark::Video),
         video: ms(Mark::Video, Mark::VideoDone),
         eyes: ms(Mark::Eyes, Mark::EyesDone),
-        layers: ms(Mark::EyesDone, Mark::End),
+        autofocus: ms(Mark::EyesDone, Mark::MeasureDone),
+        // From the measurement when there was one, but only with eye passes.
+        layers: ms(Mark::EyesDone, Mark::End)
+            .map(|eyes_on| ms(Mark::MeasureDone, Mark::End).unwrap_or(eyes_on)),
         total: ms(Mark::Start, Mark::End),
     }
 }
@@ -194,18 +201,29 @@ mod tests {
     #[test]
     fn parts_are_the_gaps_between_marks() {
         // 52 ns a tick, as on Adreno: 19.2 MHz.
-        let t = parts(at([0, 1000, 21_000, 21_000, 81_000, 85_000]), 64, 52.083);
+        let mut ticks = at([0, 1000, 21_000, 21_000, 81_000, 0, 85_000]);
+        ticks[Mark::MeasureDone as usize] = None;
+        let t = parts(ticks, 64, 52.083);
         let near = |a: Option<f32>, b: f32| a.is_some_and(|a| (a - b).abs() < 1e-3);
         assert!(near(t.panels, 0.052), "{t:?}");
         assert!(near(t.video, 1.042), "{t:?}");
         assert!(near(t.eyes, 3.125), "{t:?}");
         assert!(near(t.layers, 0.208), "{t:?}");
         assert!(near(t.total, 4.427), "{t:?}");
+        assert_eq!(t.autofocus, None);
+    }
+
+    #[test]
+    fn a_measurement_is_its_own_part() {
+        let t = parts(at([0, 10, 20, 20, 70, 72, 80]), 64, 1e6);
+        assert_eq!(t.eyes, Some(50.0));
+        assert_eq!(t.autofocus, Some(2.0));
+        assert_eq!(t.layers, Some(8.0));
     }
 
     #[test]
     fn a_missing_mark_leaves_only_its_parts_out() {
-        let mut ticks = at([0, 10, 20, 20, 70, 80]);
+        let mut ticks = at([0, 10, 20, 20, 70, 75, 80]);
         ticks[Mark::Eyes as usize] = None;
         ticks[Mark::EyesDone as usize] = None;
         let t = parts(ticks, 64, 1.0);
@@ -217,7 +235,7 @@ mod tests {
     fn a_counter_that_wraps_still_gives_the_gap() {
         // 32 valid bits, wrapping between the marks.
         let start = (1u64 << 32) - 100;
-        let t = parts(at([start, start, start, start, 50, 100]), 32, 1e6);
+        let t = parts(at([start, start, start, start, 50, 50, 100]), 32, 1e6);
         assert_eq!(t.eyes, Some(150.0));
         assert_eq!(t.total, Some(200.0));
     }

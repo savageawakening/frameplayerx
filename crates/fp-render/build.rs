@@ -4,13 +4,21 @@ use std::path::PathBuf;
 
 /// Each SPIR-V module and the WGSL files joined into it: WGSL has no
 /// includes, so shared code is put in front.
-const MODULES: [(&str, &[&str]); 6] = [
+const MODULES: [(&str, &[&str]); 8] = [
     ("scene", &["hdr", "scene", "planes"]),
     ("scene_tp10", &["hdr", "scene", "planes_tp10"]),
     ("quad", &["quad"]),
     ("egui", &["egui"]),
     ("q10c", &["q10c"]),
     ("peak", &["hdr", "peak"]),
+    (
+        "disparity",
+        &["hdr", "scene", "planes", "disparity_planes", "disparity"],
+    ),
+    (
+        "disparity_tp10",
+        &["hdr", "scene", "planes_tp10", "disparity_tp10", "disparity"],
+    ),
 ];
 
 fn main() {
@@ -39,6 +47,13 @@ fn main() {
         let options = naga::back::spv::Options {
             lang_version: (1, 3),
             flags: naga::back::spv::WriterFlags::empty(),
+            // The disparity shader writes its workgroup memory before reading
+            // it; clearing 19 KB first would be for nothing.
+            zero_initialize_workgroup_memory: if name.starts_with("disparity") {
+                naga::back::spv::ZeroInitializeWorkgroupMemoryMode::None
+            } else {
+                naga::back::spv::ZeroInitializeWorkgroupMemoryMode::Polyfill
+            },
             ..Default::default()
         };
         let words = naga::back::spv::write_vec(&module, &info, &options, None)

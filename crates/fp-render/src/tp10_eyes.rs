@@ -16,7 +16,9 @@ use ash::vk;
 /// Binding of the first luma band; the chroma bands follow the luma ones.
 const LUMA: u32 = 2;
 const CHROMA: u32 = LUMA + MAX_LUMA_BANDS as u32;
-const BINDINGS: u32 = CHROMA + MAX_CHROMA_BANDS as u32;
+/// Autofocus's result (`shaders/disparity_tp10.wgsl`).
+const RESULT: u32 = CHROMA + MAX_CHROMA_BANDS as u32;
+const BINDINGS: u32 = RESULT + 1;
 
 /// One frame slot's descriptors and parameters, mapped for the CPU.
 struct SlotBuffers {
@@ -27,6 +29,10 @@ struct SlotBuffers {
     params: vk::Buffer,
     params_memory: vk::DeviceMemory,
     params_bytes: *mut u8,
+    /// Where autofocus measuring this slot's picture writes.
+    result: vk::Buffer,
+    result_memory: vk::DeviceMemory,
+    result_bytes: *mut u8,
 }
 
 pub(crate) struct Tp10Eyes {
@@ -39,6 +45,8 @@ pub(crate) struct Tp10Eyes {
     offsets: Vec<usize>,
     sampled_size: usize,
     slots: Vec<SlotBuffers>,
+    /// Autofocus measuring the picture where it lies, where it could be made.
+    measure: Option<(vk::PipelineLayout, vk::Pipeline)>,
 }
 
 // SAFETY: the mapped pointers are written only by the thread driving the
@@ -64,6 +72,7 @@ impl Tp10Eyes {
             offsets: Vec::new(),
             sampled_size: 0,
             slots: Vec::new(),
+            measure: None,
         };
         if let Err(e) = t.create(gpu, color_format, sampler, slots, shading_rate) {
             t.destroy(gpu);
@@ -99,13 +108,18 @@ impl Tp10Eyes {
                 let ty = match b {
                     0 => vk::DescriptorType::UNIFORM_BUFFER,
                     1 => vk::DescriptorType::SAMPLER,
+                    RESULT => vk::DescriptorType::STORAGE_BUFFER,
                     _ => vk::DescriptorType::SAMPLED_IMAGE,
                 };
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(b)
                     .descriptor_type(ty)
                     .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+                    .stage_flags(
+                        vk::ShaderStageFlags::VERTEX
+                            | vk::ShaderStageFlags::FRAGMENT
+                            | vk::ShaderStageFlags::COMPUTE,
+                    )
             })
             .collect();
         let d = &gpu.device;
@@ -150,6 +164,12 @@ impl Tp10Eyes {
             let s = self.slot_buffers(gpu, &dbp, sampler)?;
             self.slots.push(s);
         }
+        self.measure = crate::disparity::supported(gpu)
+            .and_then(|()| {
+                crate::disparity::pipeline(gpu, crate::DISPARITY_TP10_SPV, &[self.set_layout], true)
+            })
+            .inspect_err(|e| log::warn!("autofocus can't measure 10-bit pictures in place: {e}"))
+            .ok();
         Ok(())
     }
 
@@ -170,6 +190,9 @@ impl Tp10Eyes {
             params: vk::Buffer::null(),
             params_memory: vk::DeviceMemory::null(),
             params_bytes: std::ptr::null_mut(),
+            result: vk::Buffer::null(),
+            result_memory: vk::DeviceMemory::null(),
+            result_bytes: std::ptr::null_mut(),
         };
         let made = (|| -> Result<()> {
             let params_size = size_of::<SceneParams>() as u64;
@@ -191,6 +214,13 @@ impl Tp10Eyes {
                         &mut s.params_bytes,
                         params_size,
                         vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    ),
+                    (
+                        &mut s.result,
+                        &mut s.result_memory,
+                        &mut s.result_bytes,
+                        crate::disparity::RESULT_BYTES,
+                        vk::BufferUsageFlags::STORAGE_BUFFER,
                     ),
                 ] {
                     *buffer = d
@@ -237,6 +267,18 @@ impl Tp10Eyes {
                             p_sampler: &sampler,
                         }),
                     &mut set[at..at + dbp.sampler_descriptor_size],
+                );
+                let storage = vk::DescriptorAddressInfoEXT::default()
+                    .address(address(s.result))
+                    .range(crate::disparity::RESULT_BYTES);
+                let at = self.offsets[RESULT as usize];
+                self.db.get_descriptor(
+                    &vk::DescriptorGetInfoEXT::default()
+                        .ty(vk::DescriptorType::STORAGE_BUFFER)
+                        .data(vk::DescriptorDataEXT {
+                            p_storage_buffer: &storage,
+                        }),
+                    &mut set[at..at + dbp.storage_buffer_descriptor_size],
                 );
             }
             Ok(())
@@ -307,14 +349,64 @@ impl Tp10Eyes {
         }
     }
 
+    /// Records autofocus measuring slot `slot`'s picture at `w`, outside a
+    /// render pass, after its eye passes; whether it could.
+    pub fn measure(
+        &self,
+        gpu: &Gpu,
+        cmd: vk::CommandBuffer,
+        slot: usize,
+        w: &crate::disparity::Window,
+    ) -> bool {
+        let (Some((layout, pipeline)), Some(s)) = (self.measure, self.slots.get(slot)) else {
+            return false;
+        };
+        let binding = [vk::DescriptorBufferBindingInfoEXT::default()
+            .address(s.descriptor_address)
+            .usage(
+                vk::BufferUsageFlags::RESOURCE_DESCRIPTOR_BUFFER_EXT
+                    | vk::BufferUsageFlags::SAMPLER_DESCRIPTOR_BUFFER_EXT,
+            )];
+        // SAFETY: recording; the pipeline, layout and buffer are valid, and
+        // the slot's descriptors were written for this frame.
+        unsafe {
+            gpu.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+            self.db.cmd_bind_descriptor_buffers(cmd, &binding);
+            self.db.cmd_set_descriptor_buffer_offsets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                layout,
+                0,
+                &[0],
+                &[0],
+            );
+        }
+        crate::disparity::dispatch(gpu, cmd, layout, w);
+        true
+    }
+
+    /// What slot `slot`'s last measurement wrote; once its fence has
+    /// signalled.
+    pub fn result(&self, slot: usize) -> Option<&[u8]> {
+        let s = self.slots.get(slot)?;
+        // SAFETY: the mapping covers the buffer, which no submitted frame
+        // writes any more.
+        Some(unsafe {
+            std::slice::from_raw_parts(s.result_bytes, crate::disparity::RESULT_BYTES as usize)
+        })
+    }
+
     fn free_slot(gpu: &Gpu, s: &mut SlotBuffers) {
         // SAFETY: not in use; freeing memory unmaps it; nulls are ignored.
         unsafe {
             let d = &gpu.device;
             d.destroy_buffer(std::mem::take(&mut s.descriptors), None);
             d.destroy_buffer(std::mem::take(&mut s.params), None);
+            d.destroy_buffer(std::mem::take(&mut s.result), None);
             d.free_memory(std::mem::take(&mut s.descriptor_memory), None);
             d.free_memory(std::mem::take(&mut s.params_memory), None);
+            d.free_memory(std::mem::take(&mut s.result_memory), None);
         }
     }
 
@@ -325,6 +417,10 @@ impl Tp10Eyes {
         // SAFETY: not in use (the device is idle); nulls are ignored.
         unsafe {
             let d = &gpu.device;
+            if let Some((layout, pipeline)) = self.measure.take() {
+                d.destroy_pipeline(pipeline, None);
+                d.destroy_pipeline_layout(layout, None);
+            }
             d.destroy_pipeline(std::mem::take(&mut self.pipeline), None);
             d.destroy_pipeline_layout(std::mem::take(&mut self.layout), None);
             d.destroy_descriptor_set_layout(std::mem::take(&mut self.set_layout), None);

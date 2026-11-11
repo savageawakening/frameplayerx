@@ -41,6 +41,9 @@ pub struct FrameInput {
     pub time: f64,
     pub dt: f32,
     pub head: Option<(Vec3, Quat)>,
+    /// Where the eyes look, a direction in the play space, while they're
+    /// tracked on a headset that can.
+    pub gaze: Option<Vec3>,
     pub hands: [Hand; 2],
     pub passthrough_available: bool,
     /// The compositor can draw panels and rays as quad layers (OpenXR);

@@ -58,6 +58,12 @@ struct Params {
     // chroma: x first-row step, y rows, z the plane's rows, w count
     tp10: vec4<f32>,
     tp10_uv: vec4<f32>,
+    // Autofocus: x the focus distance, metres (0 off), y the cameras'
+    // separation, metres.
+    focus: vec4<f32>,
+    // xyz: each eye's position from the middle of the head, in the room
+    // frame, metres.
+    eyes: array<vec4<f32>, 2>,
 };
 
 struct PushConstants {
@@ -122,6 +128,18 @@ fn off_centre(d: vec3<f32>, p: vec3<f32>, r: f32) -> vec3<f32> {
     let b = dot(q, d);
     let t = -b + sqrt(b * b - dot(q, q) + r * r);
     return normalize(q + t * d);
+}
+
+// Autofocus: the eye's picture as if painted on a sphere of the focus
+// distance's radius around the camera that took it, half the cameras'
+// separation to that side, and seen from where the eye really is. What is at
+// the focus distance then lands where it really was, whatever the viewer's
+// IPD; with the eyes where the cameras were, nothing changes. `s` is -0.5 for
+// the left eye, 0.5 for the right; `d` is in the video's frame.
+fn focused(d: vec3<f32>, eye: u32, s: f32) -> vec3<f32> {
+    let at = params.viewer.xyz + params.eyes[eye].xyz;
+    let camera = vec3<f32>(s * params.focus.y, 0.0, 0.0);
+    return off_centre(d, (params.correction * vec4<f32>(at, 0.0)).xyz - camera, params.focus.x);
 }
 
 // Ray (forward = -Z, right = +X, up = +Y) to normalised video coordinates
@@ -331,8 +349,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         d = rot_x(params.lens.z * s) * d;
         d = rot_z(params.lens.w * s) * d;
         d = normalize((params.correction * vec4<f32>(d, 0.0)).xyz);
-        d = off_centre(d, (params.correction * vec4<f32>(params.viewer.xyz, 0.0)).xyz,
-                       params.viewer.w);
+        if (params.focus.x > 0.0) {
+            d = focused(d, eye, s);
+        } else {
+            d = off_centre(d, (params.correction * vec4<f32>(params.viewer.xyz, 0.0)).xyz,
+                           params.viewer.w);
+        }
         d = zoom_dir(d, params.proj.z);
         if (kind == 1u) {
             uv = equirect_uv(d, params.proj.x, params.proj.y);

@@ -13,6 +13,7 @@
 //! - [`sync`]: locking that survives a panicking thread.
 //! - [`volume`]: microSD cards and USB drives, known by their filesystem's ID.
 
+pub mod autofocus;
 pub mod dirs;
 pub mod display;
 pub mod format;

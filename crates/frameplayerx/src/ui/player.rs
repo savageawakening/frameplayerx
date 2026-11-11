@@ -1160,7 +1160,15 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                             || (flat && (pb.settings.yaw, pb.settings.pitch) != (0.0, 0.0));
                         position_tab(ui, &mut pb.settings, flat, moved, v.actions);
                     }
-                    2 => stereo_tab(ui, &mut pb.settings, true),
+                    2 => {
+                        let measurable = pb.player.current_frame().is_some_and(|f| {
+                            let rotation =
+                                pb.player.info().video_stream().map_or(0, |v| v.rotation);
+                            fp_render::disparity::measurable(&pb.format, rotation, f.layout)
+                        });
+                        let autofocus = measurable.then_some(&mut v.settings.autofocus);
+                        stereo_tab(ui, &mut pb.settings, true, autofocus);
+                    }
                     3 => picture_tab(ui, &mut pb.settings),
                     4 => {
                         widgets::section_label(ui, tr!("settings-passthrough-videos"));
@@ -1555,10 +1563,23 @@ fn position_tab(
 }
 
 /// Depth and eye alignment, with subtitle depth unless `subtitles` is off
-/// (Settings has it with the subtitles).
-pub(super) fn stereo_tab(ui: &mut egui::Ui, s: &mut ViewSettings, subtitles: bool) {
+/// (Settings has it with the subtitles), and the autofocus switch when given
+/// (a video it can measure is open).
+pub(super) fn stereo_tab(
+    ui: &mut egui::Ui,
+    s: &mut ViewSettings,
+    subtitles: bool,
+    autofocus: Option<&mut bool>,
+) {
     let d = ViewSettings::default();
     widgets::rows(ui, |r| {
+        if let Some(on) = autofocus {
+            r.switch(
+                tr!("adjust-autofocus"),
+                Some(tr!("adjust-autofocus-desc")),
+                on,
+            );
+        }
         r.slider(
             tr!("adjust-depth"),
             Some(tr!("adjust-depth-desc")),

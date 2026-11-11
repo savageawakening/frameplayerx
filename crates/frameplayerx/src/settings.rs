@@ -114,6 +114,10 @@ pub struct Settings {
     /// Up next starts again from the first video after the last, and X and
     /// Y step round it.
     pub loop_playlist: bool,
+    /// Draws a 3D 180° video at the depth of what the eyes are on, so that
+    /// it's seen where it was whatever the viewer's IPD
+    /// ([`fp_core::autofocus`]).
+    pub autofocus: bool,
     /// The performance overlay (Settings › General › Diagnostics).
     pub perf_overlay: bool,
     /// What the controller buttons and thumbsticks do.
@@ -263,6 +267,7 @@ impl Default for Settings {
             loop_video: false,
             autoplay: false,
             loop_playlist: false,
+            autofocus: false,
             perf_overlay: false,
             controls: crate::bindings::Bindings::default(),
             panel_offsets: PanelOffsets::default(),

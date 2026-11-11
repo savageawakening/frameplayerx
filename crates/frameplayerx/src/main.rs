@@ -516,6 +516,7 @@ fn run_xr(args: &Args) -> Result<(), Error> {
                 time: start.elapsed().as_secs_f64(),
                 dt,
                 head: frame.head,
+                gaze: input.gaze.map(|(_, q)| q * glam::Vec3::NEG_Z),
                 hands: input.hands,
                 passthrough_available: session.supports_passthrough_blend(),
                 layers,
@@ -623,7 +624,11 @@ fn run_xr(args: &Args) -> Result<(), Error> {
                 );
                 gaze_deg.clear();
             }
-            if let Some(pb) = &app.playback {
+            if let Some(pb) = &mut app.playback {
+                let af = pb.autofocus.take_stats();
+                if af.measured + af.blocked[0] > 0 {
+                    log::info!("autofocus: {af}");
+                }
                 let st = pb.player.stats();
                 let hdr = renderer
                     .hdr_scene()

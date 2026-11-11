@@ -938,3 +938,103 @@ fn stereo_alignment_stays_vertical_when_recentred_sideways() {
     );
     e.destroy(&r);
 }
+
+/// Where in the middle row of an eye image the red is, pixels.
+fn red_column(img: &[u8]) -> Option<f32> {
+    let reds: Vec<u32> = (0..SIZE)
+        .filter(|&x| is_red(px(img, x, SIZE / 2)))
+        .collect();
+    (!reds.is_empty()).then(|| reds.iter().sum::<u32>() as f32 / reds.len() as f32 + 0.5)
+}
+
+#[test]
+fn autofocus_shows_a_point_at_the_focus_distance_where_it_really_is() {
+    let Some((mut r, mut e)) = setup() else {
+        return;
+    };
+    // A point half a metre ahead of cameras 64 mm apart, each image showing
+    // it as a red stripe where its camera saw it; eyes 40 mm apart.
+    let (baseline, ipd, ahead) = (0.064f32, 0.040f32, 0.5f32);
+    let camera = |eye: usize| if eye == 1 { 0.5 } else { -0.5 } * baseline;
+    let seen_at = |eye: usize| (-camera(eye)).atan2(ahead).to_degrees();
+    let f = frame(2048, 1024, |u, _| {
+        let eye = usize::from(u >= 0.5);
+        let lon = (u * 2.0).fract() * 180.0 - 90.0;
+        if (lon - seen_at(eye)).abs() < 0.3 {
+            [255, 0, 0]
+        } else {
+            [40, 40, 40]
+        }
+    });
+    let fov = 30.0f32;
+    let eyes = [-0.5f32, 0.5].map(|s| EyeView {
+        view: view(Vec3::new(s * ipd, 1.6, 0.0), Quat::IDENTITY),
+        proj: projection(Fov::symmetric(fov), 0.05, 100.0),
+    });
+    let column = |degrees: f32| {
+        let ndc = degrees.to_radians().tan() / (fov / 2.0).to_radians().tan();
+        (ndc + 1.0) / 2.0 * SIZE as f32
+    };
+    let mut draw = |focus| {
+        let p = VideoParams {
+            focus,
+            ..params(
+                Projection::EQUIRECT_180,
+                StereoLayout::SideBySide,
+                ViewSettings::default(),
+            )
+        };
+        r.begin_frame().unwrap();
+        r.set_video(Some(&f)).unwrap();
+        r.draw(&e.targets(), &eyes, &p, &[]).unwrap();
+        r.end_frame().unwrap();
+        [e.read(&r, 0).unwrap(), e.read(&r, 1).unwrap()]
+    };
+    let off = draw(None);
+    let on = draw(Some(fp_render::Focus {
+        distance: (ahead * ahead + camera(0) * camera(0)).sqrt(),
+        baseline,
+    }));
+    for eye in 0..2 {
+        let viewer = if eye == 1 { 0.5 } else { -0.5 } * ipd;
+        let truly = (-viewer).atan2(ahead).to_degrees();
+        let (was, now) = (
+            red_column(&off[eye]).unwrap(),
+            red_column(&on[eye]).unwrap(),
+        );
+        // Without autofocus, where the camera saw it; with it, where it is.
+        assert!((was - column(seen_at(eye))).abs() < 1.0, "eye {eye}: {was}");
+        assert!(
+            (now - column(truly)).abs() < 1.0,
+            "eye {eye}: {now}, {}",
+            column(truly)
+        );
+    }
+    // Eyes where the cameras were see what they always did.
+    let eyes = [-0.5f32, 0.5].map(|s| EyeView {
+        view: view(Vec3::new(s * baseline, 1.6, 0.0), Quat::IDENTITY),
+        proj: projection(Fov::symmetric(fov), 0.05, 100.0),
+    });
+    let mut draw = |focus| {
+        let p = VideoParams {
+            focus,
+            ..params(
+                Projection::EQUIRECT_180,
+                StereoLayout::SideBySide,
+                ViewSettings::default(),
+            )
+        };
+        r.begin_frame().unwrap();
+        r.set_video(Some(&f)).unwrap();
+        r.draw(&e.targets(), &eyes, &p, &[]).unwrap();
+        r.end_frame().unwrap();
+        [e.read(&r, 0).unwrap(), e.read(&r, 1).unwrap()]
+    };
+    let off = draw(None);
+    let on = draw(Some(fp_render::Focus {
+        distance: 0.3,
+        baseline,
+    }));
+    assert!(off == on, "the same picture, pixel for pixel");
+    e.destroy(&r);
+}

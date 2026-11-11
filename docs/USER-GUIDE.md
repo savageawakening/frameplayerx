@@ -602,6 +602,22 @@ Where videos start is set in Settings: **Video position** for the screen,
 zoom, height and background, **Picture** for the picture and a 3D video's
 depth and eye alignment, and Sound and subtitles for subtitle depth.
 
+### Autofocus
+
+A 3D video is filmed by two cameras a set distance apart, and your eyes are
+seldom exactly that far apart: things in the picture then look nearer or
+farther than they were, closer up most of all. **Autofocus** (**⚙ › Stereo**)
+measures how far away the picture is where you're looking and draws it so
+that what you look at is seen at its own distance. On a headset that tracks
+your eyes it follows them; otherwise it follows your head, so face what you
+want to look at. It eases from one distance to the next rather than jumping,
+and keeps the last one while it can't measure, over smooth walls or sky.
+
+It's offered for 180° side-by-side videos, 8-bit or 10-bit, and stays on for
+those until you turn it off; off, the picture is drawn exactly as without it.
+**Depth** still works on top of it. It uses a little of the headset's
+graphics power while it's on, and none while it's off.
+
 ### Fisheye lenses
 
 A fisheye format shows **Fisheye lens** under the format list. Its presets

@@ -17,6 +17,7 @@
 
 pub mod backdrop;
 pub mod capture;
+pub mod disparity;
 mod foveation;
 pub mod gpu;
 pub mod hdr;
@@ -34,7 +35,7 @@ mod video;
 
 pub use foveation::Foveation;
 pub use gpu::{Creator, DirectCreator, Gpu};
-pub use params::VideoParams;
+pub use params::{Focus, VideoParams};
 pub use renderer::{EyeTarget, EyeView, PanelId, QuadDraw, QuadTexture, Renderer};
 pub use timing::GpuTimes;
 
@@ -74,3 +75,6 @@ pub(crate) const Q10C_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q10
 pub(crate) const PEAK_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/peak.spv"));
 pub(crate) const SCENE_TP10_SPV: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/scene_tp10.spv"));
+pub(crate) const DISPARITY_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/disparity.spv"));
+pub(crate) const DISPARITY_TP10_SPV: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/disparity_tp10.spv"));

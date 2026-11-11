@@ -297,6 +297,25 @@ pub const BOTTOM: (vk::PipelineStageFlags2, vk::AccessFlags2) = (
     vk::AccessFlags2::NONE,
 );
 
+/// A global memory barrier (synchronization2).
+pub fn memory_barrier(
+    gpu: &Gpu,
+    cmd: vk::CommandBuffer,
+    src: (vk::PipelineStageFlags2, vk::AccessFlags2),
+    dst: (vk::PipelineStageFlags2, vk::AccessFlags2),
+) {
+    let b = [vk::MemoryBarrier2::default()
+        .src_stage_mask(src.0)
+        .src_access_mask(src.1)
+        .dst_stage_mask(dst.0)
+        .dst_access_mask(dst.1)];
+    // SAFETY: recording into a command buffer in the recording state.
+    unsafe {
+        gpu.device
+            .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&b));
+    };
+}
+
 pub const TOP: (vk::PipelineStageFlags2, vk::AccessFlags2) =
     (vk::PipelineStageFlags2::TOP_OF_PIPE, vk::AccessFlags2::NONE);
 pub const TRANSFER_WRITE: (vk::PipelineStageFlags2, vk::AccessFlags2) = (

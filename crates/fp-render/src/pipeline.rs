@@ -139,7 +139,13 @@ pub(crate) fn set_layout(
                 .binding(i)
                 .descriptor_type(t)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::VERTEX)
+                // Compute too: autofocus measures the frame through the
+                // scene's set (crate::disparity).
+                .stage_flags(
+                    vk::ShaderStageFlags::FRAGMENT
+                        | vk::ShaderStageFlags::VERTEX
+                        | vk::ShaderStageFlags::COMPUTE,
+                )
         })
         .collect();
     // SAFETY: valid create info.

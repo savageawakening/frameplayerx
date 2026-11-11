@@ -412,6 +412,9 @@ adjust-roll = Roll
 adjust-zoom = Zoom
 adjust-height-desc = Raise or lower yourself in the scene.
 adjust-position-hint = Or hold a grip and the trigger and drag the picture; press the thumbstick to undo. Right grip and thumbstick up / down changes your height.
+# Player, ⚙ › Stereo, for 3D 180° videos. A switch.
+adjust-autofocus = Autofocus
+adjust-autofocus-desc = Shows what you look at at its own depth, however far apart your eyes are.
 adjust-depth = Depth
 adjust-depth-desc = Eye separation; lower if it's hard to fuse.
 adjust-vertical-align = Vertical align
