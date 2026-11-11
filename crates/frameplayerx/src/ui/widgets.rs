@@ -900,6 +900,28 @@ impl Rows<'_> {
         })
     }
 
+    /// A row with a slider over a ratio in `range`, shown as a percentage,
+    /// that moves evenly in ratio: as far from 50% to 100% as from 100% to
+    /// 200%. Its reset goes back to 100%. True when changed.
+    pub fn ratio_slider(
+        &mut self,
+        title: &str,
+        desc: Option<&str>,
+        value: &mut f32,
+        range: std::ops::RangeInclusive<f32>,
+    ) -> bool {
+        let mut t = value.max(1e-3).log2();
+        let (lo, hi) = (range.start().log2(), range.end().log2());
+        let shown = format!("{:.0}%", 2f32.powf(t) * 100.0);
+        let changed = self.row(title, desc, |ui| {
+            slider_control_shown(ui, &mut t, lo..=hi, 0.0, &shown, RATIO_STEP)
+        });
+        if changed {
+            *value = ratio_of(t);
+        }
+        changed
+    }
+
     /// A full-width line of content (a hint, a list) inside the card.
     pub fn content<R>(&mut self, add: impl FnOnce(&mut Ui) -> R) -> R {
         self.next_row(|ui| {
@@ -940,6 +962,41 @@ pub fn slider_control(
     suffix: &str,
     decimals: usize,
 ) -> bool {
+    let shown = format!("{value:.decimals$}{suffix}");
+    // A step of the shown precision, landing on it.
+    slider_control_shown(
+        ui,
+        value,
+        range,
+        default,
+        &shown,
+        10f32.powi(-(decimals as i32)),
+    )
+}
+
+/// A ratio slider's arrow-key step, in powers of two: about 3.5%.
+const RATIO_STEP: f32 = 0.05;
+
+/// The ratio at `t` (a power of two), landing on 1 when within a step of it,
+/// so 100% is easy to come back to by dragging.
+fn ratio_of(t: f32) -> f32 {
+    if t.abs() < 0.5 * RATIO_STEP {
+        1.0
+    } else {
+        2f32.powf(t)
+    }
+}
+
+/// [`slider_control`] showing `shown` for the value, the arrow keys moving
+/// it by `step`.
+fn slider_control_shown(
+    ui: &mut Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    shown: &str,
+    step: f32,
+) -> bool {
     let mut changed = false;
     let reset = (*value - default).abs() > 1e-4;
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::click());
@@ -965,7 +1022,7 @@ pub fn slider_control(
     ui.add_sized(
         [74.0, 32.0],
         egui::Label::new(
-            egui::RichText::new(format!("{value:.decimals$}{suffix}"))
+            egui::RichText::new(shown)
                 .font(theme::font(Weight::Medium, 16.0))
                 .color(theme::TEXT_2),
         ),
@@ -982,8 +1039,6 @@ pub fn slider_control(
             n(egui::Key::ArrowRight) - n(egui::Key::ArrowLeft)
         });
         if dir != 0.0 {
-            // A step of the shown precision, landing on it.
-            let step = 10f32.powi(-(decimals as i32));
             *value = (((*value / step).round() + dir) * step).clamp(*range.start(), *range.end());
             changed = true;
             ctx.request_repaint();
@@ -1625,6 +1680,17 @@ pub fn display_title(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ratio_slider_moves_evenly_in_ratio_and_lands_on_one() {
+        assert_eq!(ratio_of(0.0), 1.0);
+        assert_eq!(ratio_of(0.02), 1.0, "near 100% is 100%");
+        assert!((ratio_of(-1.0) - 0.5).abs() < 1e-6);
+        assert!((ratio_of(1.0) - 2.0).abs() < 1e-6);
+        // One arrow step is the same ratio anywhere.
+        let up = |t: f32| ratio_of(t + RATIO_STEP) / ratio_of(t);
+        assert!((up(-0.8) - up(0.6)).abs() < 1e-5);
+    }
 
     #[test]
     fn a_box_too_wide_to_fit_goes_against_the_left() {

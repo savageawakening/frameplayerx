@@ -277,10 +277,14 @@ pub(crate) fn build(
     };
     // Never a value the shader can't use: an unknown distance or
     // separation draws as without autofocus rather than as nothing.
+    // Scale makes the scene k times its size about the viewer's head: the
+    // cameras k times as far apart and the sphere k times as big, so what
+    // the eyes are on stays where they look and its vergence is 1/k.
+    let k = scale_of(s);
     let focus = match video.focus {
         Some(f) if kind != 0 && f.distance.is_finite() && f.baseline.is_finite() => Vec4::new(
-            f.distance.clamp(MIN_FOCUS_DISTANCE, MAX_FOCUS_DISTANCE),
-            f.baseline.clamp(0.0, MAX_BASELINE),
+            f.distance.clamp(MIN_FOCUS_DISTANCE, MAX_FOCUS_DISTANCE) * k,
+            f.baseline.clamp(0.0, MAX_BASELINE) * k,
             0.0,
             0.0,
         ),
@@ -337,6 +341,19 @@ pub(crate) fn build(
         tp10_uv: Vec4::ZERO,
         focus,
         eyes: [Vec4::ZERO; 2],
+    }
+}
+
+/// The scene's scale while autofocus draws ([`ViewSettings::scale`]), kept
+/// to its range; an unusable value is 1.
+fn scale_of(s: &ViewSettings) -> f32 {
+    if s.scale.is_finite() {
+        s.scale.clamp(
+            *fp_core::view::SCALE_RANGE.start(),
+            *fp_core::view::SCALE_RANGE.end(),
+        )
+    } else {
+        1.0
     }
 }
 
@@ -633,6 +650,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn scale_makes_the_scene_k_times_its_size_about_the_head() {
+        let anchor = Quat::from_rotation_y(0.3);
+        let (ipd, baseline, distance) = (0.064, 0.064, 0.8);
+        for k in [0.5f32, 1.0, 1.6, 2.0] {
+            let video = VideoParams {
+                format: VideoFormat::new(Projection::EQUIRECT_180, StereoLayout::SideBySide),
+                settings: ViewSettings {
+                    scale: k,
+                    ..Default::default()
+                },
+                anchor,
+                focus: Some(Focus { distance, baseline }),
+                ..Default::default()
+            };
+            let mut p = build(&video, None, [Mat4::IDENTITY; 2]);
+            let to_world = anchor * Quat::from_mat4(&p.correction).inverse();
+            let viewer = [-0.5f32, 0.5].map(|s| Vec3::new(s * ipd, 0.0, 0.0));
+            place_eyes(&mut p, anchor, viewer.map(|v| to_world * v));
+            // Every point of the scene, k times as far from the head, is seen
+            // in the same place of each eye's picture.
+            for (eye, &from) in viewer.iter().enumerate() {
+                let s = if eye == 1 { 0.5 } else { -0.5 };
+                let camera = Vec3::new(s * baseline, 0.0, 0.0);
+                for (lon, lat) in [(0.0f32, 0.0f32), (20.0, 5.0), (-40.0, -25.0)] {
+                    let (lon, lat) = (lon.to_radians(), lat.to_radians());
+                    let towards =
+                        Vec3::new(lat.cos() * lon.sin(), lat.sin(), -lat.cos() * lon.cos());
+                    let point = k * (camera + distance * towards);
+                    let ray = to_world * (point - from).normalize();
+                    let seen = video_dir(&p, ray, eye);
+                    assert!(
+                        close(seen, towards),
+                        "k {k} eye {eye}: {seen} for {towards}"
+                    );
+                }
+            }
+            // What the eyes are on straight ahead: the same direction from
+            // the head, its vergence 1/k as much.
+            let subject = k * Vec3::new(0.0, 0.0, -distance);
+            let rays = viewer.map(|v| (subject - v).normalize());
+            let middle = (rays[0] + rays[1]).normalize();
+            assert!(close(middle, Vec3::NEG_Z), "k {k}: {middle}");
+            let vergence = rays[0].angle_between(rays[1]);
+            let at_1 = 2.0 * (ipd / 2.0 / distance).atan();
+            assert!(
+                ((vergence / at_1) - 1.0 / k).abs() < 0.01 / k,
+                "k {k}: {} of {}",
+                vergence.to_degrees(),
+                at_1.to_degrees()
+            );
+            assert!((p.focus.x - k * distance).abs() < 1e-5);
+            assert!((p.focus.y - k * baseline).abs() < 1e-6);
+        }
+        // Without autofocus, scale does nothing.
+        let off = VideoParams {
+            format: VideoFormat::new(Projection::EQUIRECT_180, StereoLayout::SideBySide),
+            settings: ViewSettings {
+                scale: 2.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(build(&off, None, [Mat4::IDENTITY; 2]).focus, Vec4::ZERO);
+        assert_eq!(
+            build(&off, None, [Mat4::IDENTITY; 2]).proj,
+            build(
+                &VideoParams {
+                    settings: ViewSettings::default(),
+                    ..off
+                },
+                None,
+                [Mat4::IDENTITY; 2]
+            )
+            .proj
+        );
     }
 
     #[test]

@@ -112,6 +112,8 @@ pub struct Playback {
     pub epipolar_waiting: u32,
     /// Where autofocus measures, gliding between the eyes and the head.
     pub autofocus_aim: Aim,
+    /// The Scale autofocus last drew at, for the log.
+    pub autofocus_scale: f32,
     pub gaze_filter: fp_core::epipolar::GazeFilter,
     /// Adjustments differ from what is saved for this video.
     pub settings_dirty: bool,
@@ -731,6 +733,7 @@ pub fn open(
             epipolar_worker: fp_core::epipolar::Worker::start(),
             epipolar_waiting: 0,
             autofocus_aim: Default::default(),
+            autofocus_scale: 1.0,
             gaze_filter: Default::default(),
             settings_dirty: false,
             heatmap,

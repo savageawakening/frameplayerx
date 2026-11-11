@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 /// The colour around a flat screen to start with, a near-black grey.
 pub const BACKGROUND: [f32; 3] = [0.086, 0.086, 0.11];
 
+/// The scales autofocus can draw a scene at ([`ViewSettings::scale`]).
+pub const SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.5..=2.0;
+
 /// Everything the viewer can adjust about how a video is shown. Defaults are
 /// neutral. Persisted per video by the library and applied by the renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -26,6 +29,10 @@ pub struct ViewSettings {
     /// Software IPD: extra horizontal convergence between eyes, degrees.
     /// Positive pushes the image further away.
     pub ipd_offset: f32,
+    /// With autofocus drawing a 180°/360° video: how big the scene looks,
+    /// 1.0 as filmed, from [`SCALE_RANGE`]. It takes the IPD offset's place
+    /// then and does nothing otherwise.
+    pub scale: f32,
     /// Per-eye stereo alignment errors from the camera, degrees.
     pub vertical_align: f32,
     pub rotation_align: f32,
@@ -82,6 +89,7 @@ impl Default for ViewSettings {
             height: 0.0,
             forward: 0.0,
             ipd_offset: 0.0,
+            scale: 1.0,
             vertical_align: 0.0,
             rotation_align: 0.0,
             lens_k1: 0.0,
@@ -121,6 +129,8 @@ impl ViewSettings {
             height: l(self.height, other.height),
             forward: l(self.forward, other.forward),
             ipd_offset: l(self.ipd_offset, other.ipd_offset),
+            // Evenly in ratio: halfway from 50% to 200% is 100%.
+            scale: self.scale * (other.scale / self.scale).powf(t),
             vertical_align: l(self.vertical_align, other.vertical_align),
             rotation_align: l(self.rotation_align, other.rotation_align),
             lens_k1: l(self.lens_k1, other.lens_k1),
@@ -338,6 +348,21 @@ mod tests {
         k.insert(10.0, ViewSettings { zoom: 3.0, ..base });
         assert_eq!(k.frames.len(), 2);
         assert_eq!(k.at(10.0, &base).zoom, 3.0);
+    }
+
+    #[test]
+    fn scale_is_saved_with_the_video_and_blends_in_ratio() {
+        let v: ViewSettings = serde_json::from_str(r#"{"ipd_offset":2.0}"#).unwrap();
+        assert_eq!((v.scale, v.ipd_offset), (1.0, 2.0), "saved before it");
+        let small = ViewSettings {
+            scale: 0.5,
+            ..Default::default()
+        };
+        let big = ViewSettings {
+            scale: 2.0,
+            ..Default::default()
+        };
+        assert!((small.lerp(&big, 0.5).scale - 1.0).abs() < 1e-6);
     }
 
     #[test]

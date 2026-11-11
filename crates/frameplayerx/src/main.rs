@@ -631,7 +631,7 @@ fn run_xr(args: &Args) -> Result<(), Error> {
             if let Some(pb) = &mut app.playback {
                 let af = pb.autofocus.take_stats();
                 if af.locks + af.eyes_moving + af.ui_holds > 0 {
-                    log::info!("autofocus: {af}");
+                    log::info!("autofocus: {af}; scale {:.0}%", pb.autofocus_scale * 100.0);
                 }
                 let ep = pb.epipolar.take_stats();
                 if ep.coarse + ep.fine > 0 {

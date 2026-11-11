@@ -961,6 +961,9 @@ fn autofocus(
         });
         p.epipolar_waiting = 1;
     }
+    // Measured and eased on the cameras' own baseline, so the distance is
+    // the scene's; Scale changes only how it's drawn (`params::build`).
+    p.autofocus_scale = video.settings.scale;
     let baseline = af.tuning.baseline;
     video.focus = af
         .advance(input.dt)

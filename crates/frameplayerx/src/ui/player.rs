@@ -1573,8 +1573,6 @@ pub(super) fn stereo_tab(
 ) {
     let d = ViewSettings::default();
     widgets::rows(ui, |r| {
-        // While autofocus draws, the depth offset is left out (see
-        // `params::build`): say so rather than have it seem broken.
         let focusing = autofocus.as_deref().copied().unwrap_or(false);
         if let Some(on) = autofocus {
             r.switch(
@@ -1583,19 +1581,26 @@ pub(super) fn stereo_tab(
                 on,
             );
         }
-        r.slider(
-            tr!("adjust-depth"),
-            Some(if focusing {
-                tr!("adjust-depth-autofocus-desc")
-            } else {
-                tr!("adjust-depth-desc")
-            }),
-            &mut s.ipd_offset,
-            -5.0..=5.0,
-            0.0,
-            "°",
-            1,
-        );
+        // While autofocus draws, the IPD offset is left out (see
+        // `params::build`) and Scale takes its place; the offset is kept.
+        if focusing {
+            r.ratio_slider(
+                tr!("adjust-scale"),
+                Some(tr!("adjust-scale-desc")),
+                &mut s.scale,
+                fp_core::view::SCALE_RANGE,
+            );
+        } else {
+            r.slider(
+                tr!("adjust-depth"),
+                Some(tr!("adjust-depth-desc")),
+                &mut s.ipd_offset,
+                -5.0..=5.0,
+                0.0,
+                "°",
+                1,
+            );
+        }
         r.slider(
             tr!("adjust-vertical-align"),
             None,

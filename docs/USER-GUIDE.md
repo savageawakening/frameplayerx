@@ -616,10 +616,16 @@ while you look at the menus.
 
 It's offered for 180° side-by-side videos, 8-bit or 10-bit, and stays on for
 those until you turn it off; off, the picture is drawn exactly as without it.
-**Depth** doesn't apply while it's on, since autofocus already sets the
-distance of what you look at for where your eyes really are, and a depth
-offset would only pull it off that again; **Vertical align** and **Rotation
-align** still do. When you look away to something new it glides there faster
+While it's on, **Scale** takes the place of **Depth**: with autofocus on,
+it makes the scene look bigger or smaller, from 50% to 200% (100% is as
+filmed). What you look at stays where it is; everything grows or shrinks
+around your head, so at 200% a face a metre away looks like a giant's two
+metres away, and at 50% like a doll's half a metre away. It's kept for each
+video, as Depth is. Depth doesn't apply while autofocus is on, since
+autofocus already sets the distance of what you look at for where your eyes
+really are, and a depth offset would only pull it off that again; your Depth
+setting is kept for when autofocus is off. **Vertical align** and **Rotation
+align** still apply. When you look away to something new it glides there faster
 the farther it has to go, and a cut to a new scene starts it measuring
 afresh. It uses a little of the headset's graphics power while it's on, and
 none while it's off.
