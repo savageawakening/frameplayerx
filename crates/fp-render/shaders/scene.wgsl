@@ -136,8 +136,15 @@ fn off_centre(d: vec3<f32>, p: vec3<f32>, r: f32) -> vec3<f32> {
 // the focus distance then lands where it really was, whatever the viewer's
 // IPD; with the eyes where the cameras were, nothing changes. `s` is -0.5 for
 // the left eye, 0.5 for the right; `d` is in the video's frame.
+//
+// The viewer's offset (height, forward) moves them on the focus sphere as it
+// would on the usual one: beyond that one's radius it grows with the focus
+// distance, so a far focus draws as without autofocus and easing out to
+// infinity meets that exactly (the sphere's geometry is the same at any
+// size).
 fn focused(d: vec3<f32>, eye: u32, s: f32) -> vec3<f32> {
-    let at = params.viewer.xyz + params.eyes[eye].xyz;
+    let grow = max(1.0, params.focus.x / params.viewer.w);
+    let at = params.viewer.xyz * grow + params.eyes[eye].xyz;
     let camera = vec3<f32>(s * params.focus.y, 0.0, 0.0);
     let p = (params.correction * vec4<f32>(at, 0.0)).xyz - camera;
     return off_centre(d, softly_inside(p, params.focus.x), params.focus.x);

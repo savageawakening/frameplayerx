@@ -290,14 +290,12 @@ pub(crate) fn build(
         ),
         _ => Vec4::ZERO,
     };
-    // While autofocus draws the picture, it puts what the eyes are on at its
-    // own distance for where the eyes really are: the IPD offset would only
-    // shift that, so it's left out (the alignment turns stay).
-    let ipd_offset = if focus.x > 0.0 {
-        0.0
-    } else {
-        deg(s.ipd_offset)
-    };
+    // While autofocus draws the picture near, it puts what the eyes are on
+    // at its own distance for where the eyes really are: the IPD offset would
+    // only shift that, so it's left out (the alignment turns stay). It comes
+    // back as the focus goes far, all of it by the time autofocus lets go, so
+    // nothing jumps either way.
+    let ipd_offset = deg(s.ipd_offset) * ipd_share(focus.x);
     SceneParams {
         inv_view_proj,
         correction,
@@ -342,6 +340,21 @@ pub(crate) fn build(
         focus,
         eyes: [Vec4::ZERO; 2],
     }
+}
+
+/// Where the IPD offset starts coming back as the focus goes far, and where
+/// all of it is back, metres. Autofocus lets go well beyond the far one.
+const IPD_BACK_FROM: f32 = 3.0;
+const IPD_BACK_BY: f32 = 100.0;
+
+/// How much of the IPD offset applies with the focus drawn at `distance`
+/// (0 without autofocus): none near, all far, evenly in vergence between.
+fn ipd_share(distance: f32) -> f32 {
+    if distance <= 0.0 {
+        return 1.0;
+    }
+    let (near, far) = (1.0 / IPD_BACK_FROM, 1.0 / IPD_BACK_BY);
+    ((near - 1.0 / distance) / (near - far)).clamp(0.0, 1.0)
 }
 
 /// The scene's scale while autofocus draws ([`ViewSettings::scale`]), kept
@@ -421,7 +434,8 @@ pub(crate) fn video_dir(p: &SceneParams, ray: Vec3, eye: usize) -> Vec3 {
     d = Mat4::from_rotation_z(p.lens.w * s).transform_vector3(d);
     d = p.correction.transform_vector3(d).normalize();
     d = if p.focus.x > 0.0 {
-        let at = p.viewer.xyz() + p.eyes[eye].xyz();
+        let grow = (p.focus.x / p.viewer.w).max(1.0);
+        let at = p.viewer.xyz() * grow + p.eyes[eye].xyz();
         let camera = Vec3::new(s * p.focus.y, 0.0, 0.0);
         let offset = softly_inside(p.correction.transform_vector3(at) - camera, p.focus.x);
         off_centre(d, offset, p.focus.x)
@@ -781,6 +795,65 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(build(&flat, None, [Mat4::IDENTITY; 2]).focus, Vec4::ZERO);
+    }
+
+    #[test]
+    fn the_picture_moves_smoothly_as_the_focus_comes_and_goes() {
+        // Everything that differs between the two paths: the viewer moved,
+        // an IPD offset, eyes not as far apart as the cameras.
+        let (ipd, baseline) = (0.058, 0.064);
+        let anchor = Quat::from_rotation_y(0.4);
+        let params = |focus: Option<f32>| {
+            let video = VideoParams {
+                format: VideoFormat::new(Projection::EQUIRECT_180, StereoLayout::SideBySide),
+                settings: ViewSettings {
+                    height: 0.3,
+                    forward: -0.2,
+                    ipd_offset: 3.0,
+                    ..Default::default()
+                },
+                anchor,
+                focus: focus.map(|distance| Focus { distance, baseline }),
+                ..Default::default()
+            };
+            let mut p = build(&video, None, [Mat4::IDENTITY; 2]);
+            let to_world = anchor * Quat::from_mat4(&p.correction).inverse();
+            let eyes = [-0.5f32, 0.5].map(|s| to_world * Vec3::new(s * ipd, 0.0, 0.0));
+            place_eyes(&mut p, anchor, eyes);
+            p
+        };
+        let rays = [
+            Vec3::NEG_Z,
+            Vec3::new(0.4, 0.2, -1.0).normalize(),
+            Vec3::new(-0.7, -0.4, -0.6).normalize(),
+        ]
+        .map(|r| anchor * r);
+        let seen = |p: &SceneParams| rays.map(|r| [0, 1].map(|eye| video_dir(p, r, eye)));
+        let apart = |a: &[[Vec3; 2]; 3], b: &[[Vec3; 2]; 3]| {
+            a.iter()
+                .flatten()
+                .zip(b.iter().flatten())
+                .map(|(x, y)| x.angle_between(*y).to_degrees())
+                .fold(0.0, f32::max)
+        };
+        // Where autofocus lets go (a vergence of 1e-4 rad) it draws as without.
+        let without = seen(&params(None));
+        let let_go = baseline / 1e-4;
+        assert!(apart(&seen(&params(Some(let_go))), &without) < 0.005);
+        // Easing from near to there, no frame's step is more than a few
+        // times the vergence's own (near, with the viewer 0.36 m off the
+        // middle of a sphere not much bigger, the picture slides most); a
+        // jump between the paths would be degrees.
+        let step = 0.05f32.to_radians();
+        let mut vergence = baseline / 0.3;
+        let mut last = seen(&params(Some(baseline / vergence)));
+        while vergence > step {
+            vergence -= step;
+            let now = seen(&params(Some(baseline / vergence)));
+            let moved = apart(&now, &last);
+            assert!(moved < 0.3, "{moved}° at {} m", baseline / vergence);
+            last = now;
+        }
     }
 
     #[test]

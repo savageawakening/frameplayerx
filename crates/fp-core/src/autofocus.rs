@@ -25,12 +25,24 @@ const MIN_STEP: f32 = 0.15;
 /// and a small one stays gentle.
 const GLIDE: f32 = 2.0;
 const MAX_GLIDE: f32 = 6.0;
-/// The eyes are on the way somewhere (a saccade) when their filtered speed
-/// passes this, degrees a second; slower and steady, they're following
-/// something (pursuit), and that's measured along.
+/// The eyes are on the way somewhere (a saccade) when their speed, from the
+/// gaze as tracked (not smoothed), passes this, degrees a second; slower and
+/// steady, they're following something (pursuit), and that's measured along.
 const SACCADE_SPEED: f32 = 60.0;
-/// Seconds the speed is smoothed over.
-const SPEED_SMOOTHING: f32 = 0.03;
+/// Seconds the speed is smoothed over: a sample or two, not the 1 Hz the
+/// gaze smoothing has, which would spread a saccade into a slow glide.
+const SPEED_SMOOTHING: f32 = 0.02;
+/// The farthest a depth is taken to be, metres: past it (sky, far scenery,
+/// the far end of the search) the focus settles here rather than at
+/// infinity, so looking up at the sky and back doesn't ease all the way out
+/// and in again. Here the IPD offset is nearly all back (fp_render).
+pub const FAR_LIMIT: f32 = 25.0;
+/// Readings in a row within a step of each other before a held focus creeps
+/// towards them, and the share of the way it creeps with each one after:
+/// the hysteresis then can't hold the picture off the measured depth for
+/// good.
+const CREEP_AFTER: u32 = 3;
+const CREEP_SHARE: f32 = 0.2;
 /// Degrees of vergence a second the drawn distance moves at, and degrees a
 /// second per second it speeds up and slows down at.
 pub const RATE: f32 = 5.0;
@@ -58,6 +70,31 @@ pub struct Tuning {
     pub baseline: f32,
     /// A jump between frames that starts settling again, degrees.
     pub settle_degrees: f32,
+}
+
+impl Tuning {
+    /// Within what the feature can run with: settings.json isn't checked
+    /// when it's read, and a negative rate or baseline would stop the
+    /// easing from making sense (or panic a clamp).
+    pub fn sanitized(self) -> Tuning {
+        let d = Tuning::default();
+        let within = |v: f32, lo: f32, hi: f32, or: f32| {
+            if v.is_finite() { v.max(lo).min(hi) } else { or }
+        };
+        Tuning {
+            rate: within(self.rate, 0.1, 90.0, d.rate),
+            acceleration: within(self.acceleration, 0.1, 2000.0, d.acceleration),
+            baseline: within(self.baseline, 0.01, 0.5, d.baseline),
+            settle_degrees: within(self.settle_degrees, 0.1, 30.0, d.settle_degrees),
+        }
+    }
+}
+
+/// Whether a depth `angle` is far enough from the focus `focus` (both
+/// vergence, degrees) to move it: past a share of the larger, and never
+/// less than a small step.
+pub fn moves_focus(focus: f32, angle: f32) -> bool {
+    (angle - focus).abs() > (HYSTERESIS * angle.max(focus)).max(MIN_STEP)
 }
 
 impl Default for Tuning {
@@ -115,8 +152,10 @@ impl Easing {
         let frame = 0.5 * accel * dt;
         let stopping = (2.0 * accel * away.abs() + frame * frame).sqrt() - frame;
         let wanted = away.signum() * rate.min(stopping);
+        // Towards what it wants within the acceleration, slowing down too: a
+        // lower rate (a new, nearer target mid-glide) is reached by
+        // decelerating, not at once.
         self.speed += (wanted - self.speed).clamp(-accel * dt, accel * dt);
-        self.speed = self.speed.clamp(-rate, rate);
         let step = self.speed * dt;
         // It only stops on the target if it's going slowly enough to: too fast
         // for one that's just appeared ahead, it carries on past and comes back.
@@ -218,6 +257,13 @@ pub struct Autofocus {
     anchor: Option<[f32; 3]>,
     speed: f32,
     held: f32,
+    /// Seconds since the gaze last changed: a tracker slower than the
+    /// display repeats a sample, and the next step is over all of them.
+    since_sample: f32,
+    /// The last reading that didn't move the focus, and how many in a row
+    /// were within a step of each other.
+    last_reading: Option<f32>,
+    steady: u32,
     /// Seconds since the eyes were lost, until the head takes over.
     lost: Option<f32>,
     /// The eyes are on a panel rather than the picture.
@@ -238,14 +284,21 @@ impl Autofocus {
             Some(now) => {
                 self.lost = None;
                 let step = self.anchor.map(|at| degrees_between(at, now));
-                if let Some(step) = step {
-                    let k = 1.0 - (-dt.max(1e-4) / SPEED_SMOOTHING).exp();
-                    self.speed += k * (step / dt.max(1e-4) - self.speed);
+                match step {
+                    // The same sample again: the speed waits for the next.
+                    Some(step) if step < 1e-4 => self.since_sample += dt,
+                    Some(step) => {
+                        let over = (self.since_sample + dt).max(1e-4);
+                        let k = 1.0 - (-over / SPEED_SMOOTHING).exp();
+                        self.speed += k * (step / over - self.speed);
+                        self.since_sample = 0.0;
+                    }
+                    None => self.since_sample = 0.0,
                 }
                 self.anchor = Some(now);
-                let saccade = step.is_none_or(|step| {
-                    step > self.tuning.settle_degrees || self.speed > SACCADE_SPEED
-                });
+                let settle_degrees = self.tuning.sanitized().settle_degrees;
+                let saccade =
+                    step.is_none_or(|step| step > settle_degrees || self.speed > SACCADE_SPEED);
                 if saccade {
                     if self.held > 0.0 || step.is_none() {
                         self.since_move = Some(0.0);
@@ -294,19 +347,48 @@ impl Autofocus {
         if !angle.is_finite() {
             return;
         }
+        let t = self.tuning.sanitized();
+        let angle = angle.max(self::angle(FAR_LIMIT, t.baseline));
         self.stats.locks += 1;
         if let Some(t) = self.since_move.take() {
             self.stats.lock_times[self.stats.lock_count % LOCK_TIMES] = t;
             self.stats.lock_count += 1;
         }
         let moved = std::mem::take(&mut self.cleared)
-            || self.focus.is_none_or(|focus| {
-                (angle - focus).abs() > (HYSTERESIS * angle.max(focus)).max(MIN_STEP)
-            });
+            || self.focus.is_none_or(|focus| moves_focus(focus, angle));
         if moved {
             self.focus = Some(angle);
             self.stats.focus_changes += 1;
+            self.last_reading = None;
+            self.steady = 0;
+            return;
         }
+        // Held: readings steady somewhere else draw it there slowly.
+        self.steady = match self.last_reading {
+            Some(last) if (angle - last).abs() <= MIN_STEP => self.steady + 1,
+            _ => 1,
+        };
+        self.last_reading = Some(angle);
+        if self.steady >= CREEP_AFTER
+            && let Some(focus) = self.focus.as_mut()
+        {
+            *focus += CREEP_SHARE * (angle - *focus);
+        }
+    }
+
+    /// The focus as an angle, degrees, as the readings agreed.
+    pub fn focus_angle(&self) -> Option<f32> {
+        self.focus
+    }
+
+    /// Autofocus turned off (or the video can't be measured any more): the
+    /// drawn distance eases out to infinity, where the picture is as
+    /// without it, rather than snapping there.
+    pub fn release(&mut self) {
+        self.focus = None;
+        self.cleared = false;
+        self.last_reading = None;
+        self.steady = 0;
     }
 
     /// For a seek or a cut: the picture now may be anywhere. The drawn
@@ -320,7 +402,7 @@ impl Autofocus {
     /// How far away the focused subject is, metres, as the readings agreed.
     pub fn focus_distance(&self) -> Option<f32> {
         self.focus
-            .map(|a| distance(a, self.tuning.baseline).max(MIN_DISTANCE))
+            .map(|a| distance(a, self.tuning.sanitized().baseline).max(MIN_DISTANCE))
     }
 
     /// What has happened since the last call.
@@ -332,6 +414,8 @@ impl Autofocus {
     pub fn off(&mut self) {
         self.focus = None;
         self.shown = Easing::default();
+        self.last_reading = None;
+        self.steady = 0;
     }
 
     /// Moves the drawn distance towards the focus by `dt` seconds, and returns
@@ -345,14 +429,16 @@ impl Autofocus {
                 self.since_move = None;
             }
         }
-        let t = self.tuning;
+        let t = self.tuning.sanitized();
         if !(self.shown.value.is_finite() && self.shown.speed.is_finite()) {
             self.shown = Easing::default();
         }
         let nearest = angle(MIN_DISTANCE, t.baseline);
         let target = self.focus.map_or(0.0, |a| a.clamp(0.0, nearest));
         let gap = (target - self.shown.value).abs();
-        let rate = (GLIDE * gap).clamp(t.rate, MAX_GLIDE * t.rate);
+        // Never a clamp that panics: the tuning is sanitized, and max/min
+        // don't mind their order.
+        let rate = (GLIDE * gap).max(t.rate).min(MAX_GLIDE * t.rate);
         let shown = self.shown.step(target, dt, rate, t.acceleration);
         (shown > 1e-4).then(|| distance(shown, t.baseline).max(MIN_DISTANCE))
     }
@@ -510,16 +596,162 @@ mod tests {
     }
 
     #[test]
-    fn from_infinity_a_near_reading_moves_the_focus() {
+    fn from_far_a_near_reading_moves_the_focus() {
         let mut a = Autofocus::default();
+        // Infinity (the far end of the search, the sky) settles at the far
+        // limit rather than easing out of autofocus.
         a.lock(0.0);
-        assert_eq!(settle(&mut a), None, "infinity");
+        let far = settle(&mut a).unwrap();
+        assert!((far - FAR_LIMIT).abs() < 0.01, "{far}");
         a.lock(angle(1.5, BASELINE));
-        let got = settle(&mut a).expect("moved off infinity");
+        let got = settle(&mut a).expect("moved off far");
         assert!((got - 1.5).abs() < 0.01, "{got}");
         // And back out, past the hysteresis.
         a.lock(0.0);
-        assert_eq!(settle(&mut a), None);
+        assert!((settle(&mut a).unwrap() - FAR_LIMIT).abs() < 0.01);
+        // 40 m is past the limit too: it holds there.
+        a.lock(angle(40.0, BASELINE));
+        assert!((settle(&mut a).unwrap() - FAR_LIMIT).abs() < 0.01);
+    }
+
+    #[test]
+    fn turned_off_it_eases_out_rather_than_snapping() {
+        let mut a = Autofocus::default();
+        a.lock(angle(0.4, BASELINE));
+        settle(&mut a);
+        a.release();
+        let dt = 1.0 / 120.0;
+        let mut last = angle(0.4, BASELINE);
+        let mut frames = 0;
+        while let Some(d) = a.advance(dt) {
+            let now = angle(d, BASELINE);
+            // No more than the fastest glide a frame.
+            assert!(
+                (last - now).abs() <= MAX_GLIDE * RATE * dt + 1e-3,
+                "{last} {now}"
+            );
+            last = now;
+            frames += 1;
+            assert!(frames < 1000);
+        }
+        assert!(last < 0.01, "let go only at almost no vergence: {last}");
+        assert!(frames > 10, "not at once: {frames}");
+    }
+
+    #[test]
+    fn settings_that_make_no_sense_dont_panic() {
+        for t in [
+            Tuning {
+                rate: -5.0,
+                ..Default::default()
+            },
+            Tuning {
+                baseline: -0.064,
+                ..Default::default()
+            },
+            Tuning {
+                acceleration: f32::NAN,
+                rate: f32::INFINITY,
+                ..Default::default()
+            },
+            Tuning {
+                settle_degrees: -1.0,
+                baseline: 0.0,
+                ..Default::default()
+            },
+        ] {
+            let mut a = Autofocus {
+                tuning: t,
+                ..Default::default()
+            };
+            a.lock(3.0);
+            for _ in 0..100 {
+                a.look(Some(AHEAD), 1.0 / 90.0);
+                let d = a.advance(1.0 / 90.0);
+                assert!(d.is_none_or(|d| d.is_finite() && d > 0.0), "{t:?}: {d:?}");
+            }
+            assert!(a.focus_distance().is_none_or(|d| d > 0.0));
+        }
+    }
+
+    #[test]
+    fn a_new_target_mid_glide_slows_within_the_acceleration() {
+        let mut a = Autofocus::default();
+        a.lock(angle(3.0, BASELINE));
+        settle(&mut a);
+        a.lock(angle(0.25, BASELINE));
+        let dt = 1.0 / 90.0;
+        for _ in 0..20 {
+            a.advance(dt);
+        }
+        let fast = a.shown.speed;
+        assert!(fast > 2.0 * RATE, "gliding fast: {fast}");
+        // A target just ahead: the rate drops, but the speed only as fast as
+        // it may slow.
+        a.cleared = true;
+        a.lock(a.shown.value + 1.0);
+        a.advance(dt);
+        assert!(
+            fast - a.shown.speed <= ACCELERATION * dt + 1e-3,
+            "{fast} {}",
+            a.shown.speed
+        );
+    }
+
+    #[test]
+    fn a_small_saccade_is_seen_on_the_raw_gaze_even_at_a_lower_rate() {
+        let at = |deg: f32| {
+            let r = deg.to_radians();
+            [r.sin(), 0.0, -r.cos()]
+        };
+        // A 3° saccade over 3 frames at 120 Hz: no step over the 2° jump,
+        // but 120°/s.
+        let mut a = Autofocus::default();
+        for _ in 0..30 {
+            a.look(Some(at(0.0)), 1.0 / 120.0);
+        }
+        let mut settled = true;
+        for i in 1..=3 {
+            settled &= a.look(Some(at(i as f32)), 1.0 / 120.0);
+        }
+        assert!(!settled, "a saccade");
+        // The tracker at 60 Hz under a 120 Hz display: every sample twice.
+        // A 20°/s pursuit is no saccade, though each new sample steps twice
+        // as far as a frame would.
+        let mut a = Autofocus::default();
+        let mut states = Vec::new();
+        for i in 0..240 {
+            let deg = (i / 2) as f32 * 20.0 / 60.0;
+            states.push(a.look(Some(at(deg)), 1.0 / 120.0));
+        }
+        assert!(states[30..].iter().all(|s| *s), "pursuit stays settled");
+    }
+
+    #[test]
+    fn a_held_focus_creeps_to_steady_readings_within_the_hysteresis() {
+        let mut a = Autofocus::default();
+        a.lock(angle(1.0, BASELINE));
+        let start = a.focus_angle().unwrap();
+        // 10% nearer: within the hysteresis, but steady.
+        let near = angle(0.9, BASELINE);
+        a.lock(near);
+        a.lock(near);
+        assert_eq!(a.focus_angle(), Some(start), "two aren't steady yet");
+        for _ in 0..30 {
+            a.lock(near);
+        }
+        assert!((a.focus_angle().unwrap() - near).abs() < 0.01);
+        // Readings that wander don't.
+        let mut b = Autofocus::default();
+        b.lock(angle(1.0, BASELINE));
+        for i in 0..30 {
+            b.lock(if i % 2 == 0 {
+                angle(0.9, BASELINE)
+            } else {
+                angle(1.1, BASELINE)
+            });
+        }
+        assert_eq!(b.focus_angle(), Some(start));
     }
 
     #[test]

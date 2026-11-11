@@ -611,20 +611,25 @@ measures how far away the picture is where you're looking and draws it so
 that what you look at is seen at its own distance. On a headset that tracks
 your eyes it follows them; otherwise it follows your head, so face what you
 want to look at. It eases from one distance to the next rather than jumping,
-and keeps the last one while it can't measure, over smooth walls or sky, or
-while you look at the menus.
+and keeps the last one while it can't measure, over smooth walls, or while
+you look at the menus. Anything farther than 25 m (the sky, far scenery) is
+taken as 25 m, so looking up and back down doesn't send it all the way out
+and in again.
 
 It's offered for 180° side-by-side videos, 8-bit or 10-bit, and stays on for
-those until you turn it off; off, the picture is drawn exactly as without it.
+those until you turn it off; turned off, it eases out to the picture as
+without it rather than jumping there.
 While it's on, **Scale** takes the place of **Depth**: with autofocus on,
 it makes the scene look bigger or smaller, from 50% to 200% (100% is as
 filmed). What you look at stays where it is; everything grows or shrinks
 around your head, so at 200% a face a metre away looks like a giant's two
 metres away, and at 50% like a doll's half a metre away. It's kept for each
-video, as Depth is. Depth doesn't apply while autofocus is on, since
-autofocus already sets the distance of what you look at for where your eyes
-really are, and a depth offset would only pull it off that again; your Depth
-setting is kept for when autofocus is off. **Vertical align** and **Rotation
+video, as Depth is. Depth doesn't apply to what's near while autofocus is
+on, since autofocus already sets the distance of what you look at for where
+your eyes really are, and a depth offset would only pull it off that again;
+it comes back gradually as what you look at is farther, all of it by 100 m,
+and your Depth setting is kept for when autofocus is off. **Height** and
+**Forward** still apply. **Vertical align** and **Rotation
 align** still apply. When you look away to something new it glides there faster
 the farther it has to go, and a cut to a new scene starts it measuring
 afresh. It uses a little of the headset's graphics power while it's on, and

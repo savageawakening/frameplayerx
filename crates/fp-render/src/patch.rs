@@ -11,6 +11,11 @@ use crate::params::SceneParams;
 use crate::{Result, VkContext};
 use ash::vk;
 use fp_core::epipolar::SIGNATURE;
+
+/// The signature as the shader writes it: each cell's taps a row to a
+/// thread (shaders/patch.wgsl `CELL_TAPS`), summed here.
+const SIGNATURE_ROWS: usize = 16;
+const SIGNATURE_PARTS: usize = SIGNATURE * SIGNATURE_ROWS;
 use fp_core::epipolar::{Aim, Layout};
 use fp_core::format::{Projection, StereoLayout, VideoFormat};
 use fp_media::PixelLayout;
@@ -225,7 +230,7 @@ pub(crate) fn place(p: &SceneParams, ask: &PatchAsk) -> Option<(Strips, Drawn)> 
             beta.to_degrees(),
         ));
     }
-    if l.floats() + SIGNATURE > PATCH_FLOATS {
+    if l.floats() + SIGNATURE_PARTS > PATCH_FLOATS {
         return None;
     }
     let d = Vec3::new(
@@ -264,7 +269,7 @@ pub(crate) fn place(p: &SceneParams, ask: &PatchAsk) -> Option<(Strips, Drawn)> 
 
 /// Workgroups for a patch.
 pub(crate) fn groups(s: &Strips) -> u32 {
-    let n = s.left_columns * s.left_rows + s.right_columns * s.right_rows + SIGNATURE as u32;
+    let n = s.left_columns * s.left_rows + s.right_columns * s.right_rows + SIGNATURE_PARTS as u32;
     n.div_ceil(64)
 }
 
@@ -274,7 +279,7 @@ pub(crate) fn push_size() -> u32 {
 
 /// The patch in a result buffer's bytes.
 pub(crate) fn result(bytes: &[u8], d: &Drawn) -> PatchResult {
-    let f: Vec<f32> = bytes[..(d.layout.floats() + SIGNATURE) * 4]
+    let f: Vec<f32> = bytes[..(d.layout.floats() + SIGNATURE_PARTS) * 4]
         .as_chunks::<4>()
         .0
         .iter()
@@ -282,8 +287,10 @@ pub(crate) fn result(bytes: &[u8], d: &Drawn) -> PatchResult {
         .collect();
     let split = (d.layout.left_columns * d.layout.left_rows) as usize;
     let end = d.layout.floats();
-    let mut signature = [0.0; SIGNATURE];
-    signature.copy_from_slice(&f[end..end + SIGNATURE]);
+    let signature: [f32; SIGNATURE] = std::array::from_fn(|c| {
+        let at = end + c * SIGNATURE_ROWS;
+        f[at..at + SIGNATURE_ROWS].iter().sum()
+    });
     PatchResult {
         tag: d.tag,
         at: d.at,
@@ -515,7 +522,7 @@ mod tests {
         assert!(s.centre.length() < 1e-6);
         assert!(d.lon.abs() < 1e-4);
         assert_eq!(s.slots, Vec2::new(0.0, 1.0));
-        assert!(groups(&s) * 64 >= (d.layout.floats() + SIGNATURE) as u32);
+        assert!(groups(&s) * 64 >= (d.layout.floats() + SIGNATURE_PARTS) as u32);
     }
 
     #[test]

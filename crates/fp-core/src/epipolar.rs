@@ -87,8 +87,13 @@ pub const PROBES: [[f32; 2]; 8] = [
     [0.0, 0.0],
     [1.2, -1.2],
 ];
-/// How much the coarse picture's luma must change on average for a cut.
-const CUT_CHANGE: f32 = 0.08;
+/// How much the coarse picture's luma changing on average is a cut by itself.
+const CUT_CHANGE: f32 = 0.15;
+/// Less change than this on average (a pan over fine detail makes about
+/// half of it) is never a cut; between the two, it's one when the cells'
+/// pattern no longer correlates this well.
+const CUT_MIN_CHANGE: f32 = 0.04;
+const CUT_CORRELATION: f32 = 0.5;
 
 /// When readings agree on a depth.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -709,6 +714,8 @@ pub struct Epipolar {
     vertical: VerticalFit,
     /// Recent readings: frontal angle, and whether on the target.
     recent: Vec<(f32, bool)>,
+    /// The focus autofocus holds, vergence degrees ([`Epipolar::set_focus`]).
+    focus: Option<f32>,
     signature: Option<[f32; SIGNATURE]>,
     cut: bool,
     stats: EpiStats,
@@ -895,7 +902,20 @@ impl Epipolar {
         let n = self.recent.len();
         if self.tuning.agreement == Agreement::Fast && n >= 2 {
             let (a, b) = (self.recent[n - 1], self.recent[n - 2]);
-            if a.1 != b.1 && (a.0 - b.0).abs() <= NEIGHBOUR_AGREEMENT {
+            // At an edge the target and one neighbour can both fall on the
+            // far side while the rest doesn't: a pair that would move the
+            // focus needs another reading that moved away with it.
+            let away = |r: f32, mean: f32| {
+                self.focus.is_none_or(|f| {
+                    crate::autofocus::moves_focus(f, r) && (r - f).signum() == (mean - f).signum()
+                })
+            };
+            let mean = 0.5 * (a.0 + b.0);
+            let backed = !self
+                .focus
+                .is_some_and(|f| crate::autofocus::moves_focus(f, mean))
+                || self.recent[..n - 2].iter().any(|r| away(r.0, mean));
+            if a.1 != b.1 && (a.0 - b.0).abs() <= NEIGHBOUR_AGREEMENT && backed {
                 self.stats.locks += 1;
                 self.stats.locks_by_neighbour += 1;
                 // Their mean: two readings' noise, halved in variance.
@@ -905,18 +925,34 @@ impl Epipolar {
         None
     }
 
-    /// The eyes moved on: what was read where they were doesn't count.
+    /// The eyes moved on: what was read where they were doesn't count, nor
+    /// does a patch drawn there and still on its way.
     pub fn moved(&mut self) {
         self.recent.clear();
         self.coarse = None;
+        self.forget_in_flight();
     }
 
-    /// Forgets pending readings, for a seek or a cut.
+    /// Forgets pending readings, and any patch on its way, for a seek or a
+    /// cut.
     pub fn clear(&mut self) {
         self.recent.clear();
         self.coarse = None;
         self.signature = None;
         self.stats.clears += 1;
+        self.forget_in_flight();
+    }
+
+    /// A patch asked for before now comes back late ([`Epipolar::current`]).
+    fn forget_in_flight(&mut self) {
+        self.in_flight = false;
+        self.tag += 1;
+    }
+
+    /// The focus autofocus holds now (vergence, degrees), for the rule that
+    /// a change needs more than a pair of readings.
+    pub fn set_focus(&mut self, focus: Option<f32>) {
+        self.focus = focus;
     }
 
     pub fn take_stats(&mut self) -> EpiStats {
@@ -970,12 +1006,31 @@ impl GazeFilter {
     }
 }
 
-/// Whether two coarse pictures are of different scenes: their cells' mean
-/// luma changed by more than [`CUT_CHANGE`] on average. Each cell is the
-/// mean over a 11° by 22° area, so a pan of a few degrees hardly moves it.
+/// Whether two coarse pictures are of different scenes: their cells' luma
+/// changed by more than [`CUT_CHANGE`] on average, or by more than a pan
+/// over fine detail makes and into another pattern (a cut between scenes as
+/// bright as each other). Each cell is the mean of 16 by 16 taps over an
+/// 11° by 22° area, so a pan of a few degrees hardly moves it.
 pub fn is_cut(a: &[f32; SIGNATURE], b: &[f32; SIGNATURE]) -> bool {
-    let change: f32 = a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum();
-    change / SIGNATURE as f32 > CUT_CHANGE
+    let n = SIGNATURE as f32;
+    let change = a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f32>() / n;
+    if change > CUT_CHANGE {
+        return true;
+    }
+    if change < CUT_MIN_CHANGE {
+        return false;
+    }
+    // As much change as a pan over fine detail can make, or more: a cut if
+    // the layout isn't the same, whatever the brightness.
+    let (ma, mb) = (a.iter().sum::<f32>() / n, b.iter().sum::<f32>() / n);
+    let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        let (x, y) = (x - ma, y - mb);
+        ab += x * y;
+        aa += x * x;
+        bb += y * y;
+    }
+    ab < CUT_CORRELATION * (aa * bb).sqrt()
 }
 
 /// Moves `at` towards `to` by `dt` seconds, about two thirds of the way in
@@ -1556,6 +1611,61 @@ mod tests {
     }
 
     #[test]
+    fn a_seek_a_cut_or_the_eyes_moving_make_the_patch_on_its_way_late() {
+        for forget in [Epipolar::clear, Epipolar::moved] {
+            let mut e = Epipolar::default();
+            e.next_patch(true).unwrap();
+            let tag = e.tag();
+            forget(&mut e);
+            assert!(!e.current(tag), "drawn before");
+            // The next one asked for is current.
+            e.next_patch(true).unwrap();
+            assert!(e.current(e.tag()));
+        }
+    }
+
+    #[test]
+    fn at_an_edge_a_pair_alone_doesnt_move_the_focus() {
+        let near = angle(0.5, BASELINE);
+        let far = angle(2.0, BASELINE);
+        let read = |e: &mut Epipolar, angle: f32, centre: bool| {
+            e.centre = centre;
+            e.agree(angle)
+        };
+        // Holding the near subject; the target and a neighbour fall on the
+        // background behind its edge, the probes before them didn't.
+        let mut e = Epipolar {
+            tuning: EpiTuning {
+                agreement: Agreement::Fast,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        e.set_focus(Some(near));
+        read(&mut e, near + 0.05, false);
+        read(&mut e, near - 0.05, false);
+        assert_eq!(read(&mut e, far, true), None);
+        assert_eq!(read(&mut e, far + 0.1, false), None, "a pair alone");
+        // Another probe on the background too: it moved.
+        let mut e = Epipolar {
+            tuning: e.tuning,
+            ..Default::default()
+        };
+        e.set_focus(Some(near));
+        read(&mut e, near, false);
+        read(&mut e, far - 0.1, false);
+        read(&mut e, far, true);
+        assert!(read(&mut e, far + 0.1, false).is_some());
+        // Without a focus to keep, a pair is enough, as before.
+        let mut e = Epipolar {
+            tuning: e.tuning,
+            ..Default::default()
+        };
+        read(&mut e, far, true);
+        assert!(read(&mut e, far + 0.1, false).is_some());
+    }
+
+    #[test]
     fn a_match_given_up_on_is_late_and_dropped() {
         let mut e = Epipolar::default();
         e.next_patch(false);
@@ -1568,19 +1678,74 @@ mod tests {
     }
 
     /// A 16 by 8 coarse picture of `scene` (luma over yaw and pitch,
-    /// degrees) panned by `pan` degrees, each cell the mean of 4 by 4 taps.
+    /// degrees) panned by `pan` degrees, each cell the mean of 16 by 16 taps
+    /// (as shaders/patch.wgsl).
     fn signature_of(scene: impl Fn(f32, f32) -> f32, pan: f32) -> [f32; SIGNATURE] {
+        const TAPS: usize = 16;
         std::array::from_fn(|k| {
             let (cx, cy) = ((k % 16) as f32, (k / 16) as f32);
             let mut sum = 0.0;
-            for t in 0..16 {
-                let (tx, ty) = ((t % 4) as f32 + 0.5, (t / 4) as f32 + 0.5);
-                let yaw = (cx + tx / 4.0) / 16.0 * 180.0 - 90.0 + pan;
-                let pitch = 90.0 - (cy + ty / 4.0) / 8.0 * 180.0;
+            for t in 0..TAPS * TAPS {
+                let tx = (t % TAPS) as f32 + 0.5;
+                let ty = (t / TAPS) as f32 + 0.5;
+                let yaw = (cx + tx / TAPS as f32) / 16.0 * 180.0 - 90.0 + pan;
+                let pitch = 90.0 - (cy + ty / TAPS as f32) / 8.0 * 180.0;
                 sum += scene(yaw, pitch);
             }
-            sum / 16.0
+            sum / (TAPS * TAPS) as f32
         })
+    }
+
+    /// Black or white in squares of `size` degrees, at random: foliage, text,
+    /// a crowd far off, as fine as an 8K picture shows.
+    fn detail(size: f32, seed: u32) -> impl Fn(f32, f32) -> f32 {
+        move |yaw: f32, pitch: f32| {
+            let (x, y) = ((yaw / size).floor() as i32, (pitch / size).floor() as i32);
+            let mut h = (x as u32).wrapping_mul(0x9E37_79B1)
+                ^ (y as u32).wrapping_mul(0x85EB_CA77)
+                ^ seed.wrapping_mul(0xC2B2_AE3D);
+            h ^= h >> 15;
+            h = h.wrapping_mul(0x2C1B_3C6D);
+            h ^= h >> 12;
+            (h & 1) as f32
+        }
+    }
+
+    #[test]
+    fn a_fast_pan_over_fine_detail_is_not_a_cut() {
+        // Only fine detail, nothing larger to hold the pattern: the hardest
+        // case, each tap landing on a new square as the picture moves.
+        let fine = detail(0.3, 1);
+        let a = signature_of(&fine, 0.0);
+        for pan in [0.7, 2.3, 4.1, 6.0] {
+            assert!(!is_cut(&a, &signature_of(&fine, pan)), "pan {pan}");
+        }
+        // Fine detail over shapes.
+        let shapes = |yaw: f32, pitch: f32| {
+            0.3 + 0.2 * (yaw / 17.0).sin() * (pitch / 23.0).cos() + 0.5 * fine(yaw, pitch)
+        };
+        let a = signature_of(shapes, 0.0);
+        for pan in [0.7, 2.3, 4.1, 6.0] {
+            assert!(!is_cut(&a, &signature_of(shapes, pan)), "pan {pan}");
+        }
+    }
+
+    #[test]
+    fn a_cut_between_scenes_as_bright_as_each_other_is_a_cut() {
+        // Low contrast, the same mean brightness, another layout: a cut the
+        // brightness alone (more than 0.08 on average) missed.
+        let dim = |seed: f32| {
+            move |yaw: f32, pitch: f32| {
+                0.4 + 0.07 * (yaw / 19.0 + seed).sin() * (pitch / 21.0 + 2.0 * seed).cos()
+                    + 0.04 * (yaw / 11.0 - pitch / 14.0 + 3.0 * seed).sin()
+            }
+        };
+        let (a, b) = (signature_of(dim(0.0), 0.0), signature_of(dim(3.0), 0.0));
+        let change = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).sum::<f32>() / 128.0;
+        assert!(change < 0.08, "as bright: {change}");
+        assert!(is_cut(&a, &b));
+        // The same scene panned is still not one.
+        assert!(!is_cut(&a, &signature_of(dim(0.0), 4.0)));
     }
 
     #[test]

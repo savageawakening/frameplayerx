@@ -837,9 +837,9 @@ fn perf_video(
 
 /// Autofocus for this frame: takes in what was matched, asks for the next
 /// patch around where the eyes look (else where the head faces), and draws
-/// the picture at the distance it has eased to. Off, or for a video it can't
-/// measure, the picture is drawn as without it, at once. With the eyes on a
-/// panel, nothing is measured and the focus holds.
+/// the picture at the distance it has eased to. Turned off, or for a video it
+/// can't measure, it eases out to where the picture is drawn as without it.
+/// With the eyes on a panel, nothing is measured and the focus holds.
 fn autofocus(
     p: &mut Playback,
     on_ui: bool,
@@ -850,20 +850,31 @@ fn autofocus(
     patch: Option<fp_render::patch::PatchResult>,
 ) {
     let af = &mut p.autofocus;
-    // A frame missing for a moment (a stall, a seek) keeps the last verdict:
-    // switching off and on again would snap the picture back and ease it in.
+    // A frame missing for a moment (a stall, a seek) keeps the last verdict,
+    // and a frame that can't be measured counts only once they've gone on a
+    // while: a blip of another layout doesn't let go of the focus.
     let measurable = match frame {
         Some(f) => {
-            let m = fp_render::patch::measurable(&video.format, video.rotation, f.layout);
+            let now = fp_render::patch::measurable(&video.format, video.rotation, f.layout);
+            let m = still_measurable(&mut p.autofocus_unmeasurable, now, input.dt);
             p.autofocus_measurable = m;
             m
         }
         None => p.autofocus_measurable,
     };
     if !on || !measurable {
-        af.off();
         p.autofocus_at = None;
         p.epipolar.moved();
+        // Out to infinity, where the picture is as without autofocus, as
+        // gently as it moves anywhere; then nothing more to do.
+        af.release();
+        let baseline = af.tuning.sanitized().baseline;
+        video.focus = af
+            .advance(input.dt)
+            .map(|distance| fp_render::Focus { distance, baseline });
+        if video.focus.is_none() {
+            af.off();
+        }
         return;
     }
     // A seek: what was measured was of another part of the video.
@@ -876,7 +887,8 @@ fn autofocus(
         }
         p.autofocus_at = Some(f.pts);
     }
-    // The gaze smoothed while it rests, followed at once as it moves.
+    // Settling goes by the gaze as tracked, where a saccade is quick; the
+    // measuring aims along it smoothed while it rests.
     let gaze = p
         .gaze_filter
         .take(input.gaze.map(|g| g.to_array()), input.dt)
@@ -885,8 +897,9 @@ fn autofocus(
         af.on_ui(input.dt);
         false
     } else {
-        af.look(gaze.map(|g| g.to_array()), input.dt)
+        af.look(input.gaze.map(|g| g.to_array()), input.dt)
     };
+    p.epipolar.set_focus(af.focus_angle());
     if !settled {
         p.epipolar.moved();
     }
@@ -964,10 +977,20 @@ fn autofocus(
     // Measured and eased on the cameras' own baseline, so the distance is
     // the scene's; Scale changes only how it's drawn (`params::build`).
     p.autofocus_scale = video.settings.scale;
-    let baseline = af.tuning.baseline;
+    let baseline = af.tuning.sanitized().baseline;
     video.focus = af
         .advance(input.dt)
         .map(|distance| fp_render::Focus { distance, baseline });
+}
+
+/// Seconds of frames autofocus can't measure before it lets go.
+const UNMEASURABLE_SECONDS: f32 = 0.5;
+
+/// Whether autofocus goes on measuring, with this frame measurable `now`
+/// and `for_s` the seconds the frames haven't been, before it.
+fn still_measurable(for_s: &mut f32, now: bool, dt: f32) -> bool {
+    *for_s = if now { 0.0 } else { *for_s + dt };
+    *for_s < UNMEASURABLE_SECONDS
 }
 
 /// How long the aim takes to glide to the head when the eyes are lost, and
@@ -1009,6 +1032,21 @@ fn gaze_hits<'a>(panels: impl Iterator<Item = &'a Panel>, at: Vec3, gaze: Vec3) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blip_of_an_unmeasurable_layout_doesnt_let_go() {
+        let mut for_s = 0.0;
+        let dt = 1.0 / 90.0;
+        for _ in 0..10 {
+            assert!(still_measurable(&mut for_s, false, dt), "a blip");
+        }
+        assert!(still_measurable(&mut for_s, true, dt));
+        assert_eq!(for_s, 0.0, "and it starts again");
+        let frames = (0..90)
+            .take_while(|_| still_measurable(&mut for_s, false, dt))
+            .count();
+        assert_eq!(frames as f32, (UNMEASURABLE_SECONDS / dt).ceil() - 1.0);
+    }
 
     #[test]
     fn with_the_eyes_lost_the_aim_glides_to_the_head_and_back() {

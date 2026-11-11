@@ -1,8 +1,10 @@
 // Autofocus's epipolar measuring (fp_core::epipolar): each eye's picture
 // around the ray drawn into a strip along epipolar lines, a row to each plane
 // through both cameras, so that a point's two images differ only along the
-// row. A sample is the mean of four taps over its share of the strip. Then a
-// coarse 8 by 4 picture of the left image, to notice cuts.
+// row. A sample is the mean of 4 by 4 taps over its share of the strip, so
+// a fine picture (8K) doesn't alias at the coarse pitch. Then a coarse 16 by
+// 8 picture of the left image, each cell the mean of 16 by 16 taps over its
+// area, to notice cuts.
 //
 // Built after scene.wgsl and planes.wgsl or planes_tp10.wgsl (build.rs) for
 // `luma_at`, and after patch_planes.wgsl or patch_tp10.wgsl, which say where
@@ -32,8 +34,10 @@ struct Strips {
 };
 var<immediate> strips: Strips;
 
-// 16×8 cells, each the mean of a 4×4 grid over its area.
 const SIGNATURE: u32 = 128u;
+// Taps across a sample's square, and across a signature cell.
+const SAMPLE_TAPS: u32 = 4u;
+const CELL_TAPS: u32 = 16u;
 
 fn epipolar_luma(alpha: f32, beta: f32, slot: f32) -> f32 {
     let d = vec3<f32>(sin(alpha), -cos(alpha) * sin(beta), -cos(alpha) * cos(beta));
@@ -52,15 +56,16 @@ fn epipolar_luma(alpha: f32, beta: f32, slot: f32) -> f32 {
 }
 
 fn sample_at(at: vec2<f32>, slot: f32) -> f32 {
-    let o = 0.25 * strips.pitch;
-    let a = epipolar_luma(at.x - o, at.y - o, slot);
-    let b = epipolar_luma(at.x + o, at.y - o, slot);
-    let c = epipolar_luma(at.x - o, at.y + o, slot);
-    let d = epipolar_luma(at.x + o, at.y + o, slot);
-    if (min(min(a, b), min(c, d)) < 0.0) {
-        return -1.0;
+    var sum = 0.0;
+    for (var t = 0u; t < SAMPLE_TAPS * SAMPLE_TAPS; t++) {
+        let f = (vec2<f32>(f32(t % SAMPLE_TAPS), f32(t / SAMPLE_TAPS)) + 0.5) / f32(SAMPLE_TAPS) - 0.5;
+        let v = epipolar_luma(at.x + f.x * strips.pitch, at.y + f.y * strips.pitch, slot);
+        if (v < 0.0) {
+            return -1.0;
+        }
+        sum += v;
     }
-    return 0.25 * (a + b + c + d);
+    return sum / f32(SAMPLE_TAPS * SAMPLE_TAPS);
 }
 
 @compute @workgroup_size(64)
@@ -75,16 +80,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let j = i - left;
         let cr = vec2<f32>(f32(j % strips.right_columns), f32(j / strips.right_columns));
         out[i] = sample_at(strips.centre + strips.right_start + cr * strips.pitch, strips.slots.y);
-    } else if (i < left + right + SIGNATURE) {
+    } else if (i < left + right + SIGNATURE * CELL_TAPS) {
+        // A row of a cell's taps to a thread, so no thread has many to do;
+        // the rows are summed on the CPU (patch.rs).
         let k = i - left - right;
-        let cell = vec2<f32>(f32(k % 16u), f32(k / 16u));
+        let c = k / CELL_TAPS;
+        let row = k % CELL_TAPS;
+        let cell = vec2<f32>(f32(c % 16u), f32(c / 16u));
         let lo = 0.5 * strips.slots.x;
         var sum = 0.0;
-        for (var t = 0u; t < 16u; t++) {
-            let tap = vec2<f32>((f32(t % 4u) + 0.5) / 4.0, (f32(t / 4u) + 0.5) / 4.0);
+        for (var t = 0u; t < CELL_TAPS; t++) {
+            let tap = (vec2<f32>(f32(t), f32(row)) + 0.5) / f32(CELL_TAPS);
             let f = (cell + tap) / vec2<f32>(16.0, 8.0);
             sum += luma_at(vec2<f32>(lo + 0.5 * f.x, f.y));
         }
-        out[i] = sum / 16.0;
+        out[i] = sum / f32(CELL_TAPS * CELL_TAPS);
     }
 }
