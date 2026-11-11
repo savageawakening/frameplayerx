@@ -530,6 +530,11 @@ pub struct Stats {
     /// Clear vertical matches, and the offset learned.
     pub vertical_found: u32,
     pub vertical: Option<f32>,
+    /// Seconds in all, seconds the eyes were on a panel rather than the
+    /// picture, and how often they went there.
+    pub time: f32,
+    pub ui_time: f32,
+    pub ui_holds: u32,
     /// The longest time without readings agreeing, seconds, and what stopped
     /// them most in it.
     pub longest_stuck: f32,
@@ -547,7 +552,8 @@ impl std::fmt::Display for Stats {
         write!(
             f,
             "{} of {} trusted; stopped by {}; {} refocus, {} cuts, {} cleared; \
-             vertical offset {} from {} clear; stuck {:.1} s at most ({})",
+             vertical offset {} from {} clear; stuck {:.1} s at most ({}); eyes on a panel \
+             {:.0}% of the time, {} times",
             self.trusted,
             self.measured,
             if gates.is_empty() {
@@ -567,6 +573,8 @@ impl std::fmt::Display for Stats {
             } else {
                 self.stuck_by
             },
+            100.0 * self.ui_time / self.time.max(1e-6),
+            self.ui_holds,
         )
     }
 }
@@ -612,6 +620,8 @@ pub struct Autofocus {
     /// Cleared since the readings last agreed: the next agreement moves the
     /// focus however close it is.
     cleared: bool,
+    /// The eyes are on a panel rather than the picture.
+    on_ui: bool,
     blocked: [u32; GATES.len()],
     stats: Stats,
 }
@@ -637,6 +647,7 @@ impl Default for Autofocus {
             signature: None,
             since_agreed: 0.0,
             cleared: false,
+            on_ui: false,
             blocked: [0; GATES.len()],
             stats: Stats::default(),
         }
@@ -653,6 +664,7 @@ impl Autofocus {
     /// Takes this frame's gaze, a unit direction, if the eyes are tracked;
     /// whether it may be measured along. Without eye tracking, always.
     pub fn look(&mut self, gaze: Option<[f32; 3]>, dt: f32) -> bool {
+        self.on_ui = false;
         let settled = match gaze {
             Some(now) => {
                 self.lost = None;
@@ -679,6 +691,23 @@ impl Autofocus {
         };
         self.unsettled = !settled;
         settled
+    }
+
+    /// The eyes are on a panel this frame, `dt` seconds long: nothing is
+    /// measured and nothing counts against the eyes' settling; the focus holds
+    /// where it is. Off the panel, they settle afresh, as after any look
+    /// elsewhere. Call instead of [`Autofocus::look`].
+    pub fn on_ui(&mut self, dt: f32) {
+        if !self.on_ui {
+            self.stats.ui_holds += 1;
+        }
+        self.on_ui = true;
+        self.stats.ui_time += dt;
+        self.anchor = None;
+        self.lost = None;
+        self.held = 0.0;
+        self.unsettled = true;
+        self.forget_readings();
     }
 
     /// Notes a measurement not asked for because the eyes were moving.
@@ -884,6 +913,7 @@ impl Autofocus {
     /// it, metres: `None` while it's at infinity, where the picture is drawn
     /// as without autofocus.
     pub fn advance(&mut self, dt: f32) -> Option<f32> {
+        self.stats.time += dt;
         self.since_agreed += dt;
         for spot in &mut self.near {
             spot.age += dt;
@@ -1368,6 +1398,35 @@ mod tests {
         assert_eq!(a.advance(1.0 / 90.0), None);
         agree(&mut a, 8.0);
         assert!(settle(&mut a).is_some_and(f32::is_finite));
+    }
+
+    #[test]
+    fn eyes_on_a_panel_hold_the_focus_and_settle_afresh_after() {
+        let mut a = Autofocus::default();
+        let ahead = [0.0, 0.0, -1.0];
+        for _ in 0..12 {
+            a.look(Some(ahead), 1.0 / 90.0);
+        }
+        agree(&mut a, 8.0);
+        let held = settle(&mut a);
+        // Two votes in, then a look at a panel: they're forgotten, and
+        // nothing counts as the eyes moving.
+        a.measured(&on_gaze(reading(3.0)));
+        a.measured(&on_gaze(reading(3.0)));
+        for _ in 0..45 {
+            a.on_ui(1.0 / 90.0);
+            a.advance(1.0 / 90.0);
+        }
+        assert_eq!(settle(&mut a), held);
+        // Back on the picture: settling again before anything counts.
+        assert!(!a.look(Some(ahead), 1.0 / 90.0));
+        a.measured(&on_gaze(reading(3.0)));
+        assert_eq!(settle(&mut a), held);
+        let s = a.take_stats();
+        assert_eq!(s.ui_holds, 1);
+        assert!((s.ui_time - 0.5).abs() < 0.01, "{}", s.ui_time);
+        assert_eq!(s.blocked[0], 1, "only the reading while settling again");
+        assert!(s.to_string().contains("eyes on a panel"), "{s}");
     }
 
     #[test]

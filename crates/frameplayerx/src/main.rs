@@ -626,7 +626,7 @@ fn run_xr(args: &Args) -> Result<(), Error> {
             }
             if let Some(pb) = &mut app.playback {
                 let af = pb.autofocus.take_stats();
-                if af.measured + af.blocked[0] > 0 {
+                if af.measured + af.blocked[0] + af.ui_holds > 0 {
                     log::info!("autofocus: {af}");
                 }
                 let st = pb.player.stats();

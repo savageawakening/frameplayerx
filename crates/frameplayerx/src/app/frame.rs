@@ -154,6 +154,12 @@ impl App {
         let buzz = self.route_input(&input, anchor);
         self.paint_panels(renderer, &input, kb_target);
         self.perf_overlay(renderer, &input);
+        self.gaze_on_ui = match (input.gaze, input.head) {
+            (Some(gaze), Some((at, _))) => {
+                gaze_hits(self.panels.iter().chain([&self.perf]), at, gaze)
+            }
+            _ => false,
+        };
         let (frame, video, passthrough) = self.video(renderer, &input, anchor);
         let (quads, layers) = self.compose(&input, eye);
         FrameOutput {
@@ -593,6 +599,7 @@ impl App {
             }
             autofocus(
                 p,
+                self.gaze_on_ui,
                 self.settings.autofocus,
                 frame.as_ref(),
                 &mut video,
@@ -833,6 +840,7 @@ fn perf_video(
 /// measure, the picture is drawn as without it, at once.
 fn autofocus(
     p: &mut Playback,
+    on_ui: bool,
     on: bool,
     frame: Option<&Arc<VideoFrame>>,
     video: &mut VideoParams,
@@ -864,8 +872,15 @@ fn autofocus(
         }
         p.autofocus_at = Some(f.pts);
     }
-    let settled = af.look(input.gaze.map(|g| g.to_array()), input.dt);
-    if let Some(r) = reading {
+    // Eyes on a panel: nothing measured, nothing counted against them, the
+    // focus held. Readings asked for before are of where they were.
+    let settled = if on_ui {
+        af.on_ui(input.dt);
+        false
+    } else {
+        af.look(input.gaze.map(|g| g.to_array()), input.dt)
+    };
+    if let Some(r) = reading.filter(|_| !on_ui) {
         af.measured(&r);
     }
     if af.due() && frame.is_some() {
@@ -882,7 +897,7 @@ fn autofocus(
                     tag,
                 });
             }
-            (false, _) => af.eyes_moving(),
+            (false, _) if !on_ui => af.eyes_moving(),
             _ => {}
         }
     }
@@ -890,6 +905,13 @@ fn autofocus(
     video.focus = af
         .advance(input.dt)
         .map(|distance| fp_render::Focus { distance, baseline });
+}
+
+/// Whether the eyes' gaze from `at` meets any panel that shows.
+fn gaze_hits<'a>(panels: impl Iterator<Item = &'a Panel>, at: Vec3, gaze: Vec3) -> bool {
+    panels
+        .filter(|p| p.shown())
+        .any(|p| p.hit(at, gaze).is_some())
 }
 
 /// A direction `right` and `up` degrees from `ahead`, turning about `up_axis`
@@ -903,6 +925,21 @@ fn near_gaze(ahead: Vec3, up_axis: Vec3, right: f32, up: f32) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gaze_on_a_panel_that_shows_is_on_the_ui() {
+        let mut p = Panel::new([100, 100], glam::Vec2::new(0.5, 0.5), 1.0);
+        p.pose = Mat4::from_translation(Vec3::new(0.0, 1.6, -1.0));
+        let at = Vec3::new(0.0, 1.6, 0.0);
+        assert!(!gaze_hits([&p].into_iter(), at, Vec3::NEG_Z), "hidden");
+        p.visible = true;
+        for _ in 0..30 {
+            p.update_fade(0.05);
+        }
+        assert!(gaze_hits([&p].into_iter(), at, Vec3::NEG_Z));
+        let away = Vec3::new(0.6, 0.0, -0.8);
+        assert!(!gaze_hits([&p].into_iter(), at, away));
+    }
 
     #[test]
     fn windows_near_the_gaze_are_turned_from_it_as_asked() {

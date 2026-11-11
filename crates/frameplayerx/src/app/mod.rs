@@ -146,6 +146,8 @@ pub struct App {
     /// The performance overlay, its sampler and readings while it shows, and
     /// what it last showed.
     perf: Panel,
+    /// The eyes are on a panel this frame, rather than the picture.
+    gaze_on_ui: bool,
     perf_monitor: Option<crate::perf::Monitor>,
     perf_readings: Option<crate::perf::Readings>,
     perf_shown: ui::perf::Overlay,
@@ -289,6 +291,7 @@ impl App {
             panels,
             subs,
             perf,
+            gaze_on_ui: false,
             perf_monitor: None,
             perf_readings: None,
             perf_shown: Default::default(),
