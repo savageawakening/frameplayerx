@@ -111,6 +111,34 @@ impl SceneInfo {
         pick(false).or_else(|| pick(true))
     }
 
+    /// The heights the scene comes as files of, tallest first, one each:
+    /// what the player offers to pick from. Files of unknown height and
+    /// live transcodes aren't among them.
+    pub fn file_heights(&self) -> Vec<u32> {
+        let mut heights: Vec<u32> = self
+            .sources
+            .iter()
+            .filter(|s| !s.is_transcode())
+            .filter_map(|s| s.height)
+            .collect();
+        heights.sort_unstable_by(|a, b| b.cmp(a));
+        heights.dedup();
+        heights
+    }
+
+    /// The file to play: the first listed `picked` pixels tall when one was
+    /// picked and the scene still has it, else [`Self::best_source`] within
+    /// `max_height`.
+    pub fn source_for(&self, picked: Option<u32>, max_height: Option<u32>) -> Option<&MediaSource> {
+        picked
+            .and_then(|h| {
+                self.sources
+                    .iter()
+                    .find(|s| !s.is_transcode() && s.height == Some(h))
+            })
+            .or_else(|| self.best_source(max_height))
+    }
+
     /// What the server can transcode the scene to, tallest first, one per
     /// height (the first listed of an MP4 and a WebM, which takes servers
     /// far longer to encode).

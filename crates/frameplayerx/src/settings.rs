@@ -118,6 +118,9 @@ pub struct Settings {
     /// it's seen where it was whatever the viewer's IPD
     /// ([`fp_core::autofocus`]).
     pub autofocus: bool,
+    /// While autofocus draws: how big the scene looks, 1.0 as filmed
+    /// ([`fp_core::view::SCALE_RANGE`]). One for every video.
+    pub autofocus_scale: f32,
     /// The performance overlay (Settings › General › Diagnostics).
     pub perf_overlay: bool,
     /// What the controller buttons and thumbsticks do.
@@ -268,6 +271,7 @@ impl Default for Settings {
             autoplay: false,
             loop_playlist: false,
             autofocus: false,
+            autofocus_scale: 1.0,
             perf_overlay: false,
             controls: crate::bindings::Bindings::default(),
             panel_offsets: PanelOffsets::default(),

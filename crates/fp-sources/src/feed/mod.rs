@@ -282,6 +282,28 @@ impl FeedSource {
         }
     }
 
+    /// Opens a scene's file: the one `picked` pixels tall when it has it,
+    /// else the best within the max height.
+    fn open_picked(&self, location: &str, picked: Option<u32>) -> Result<Arc<dyn ByteSource>> {
+        let resolved = self.resolved_location(location)?;
+        let location = resolved.as_str();
+        let url = if is_direct_file(location) {
+            location.to_string()
+        } else {
+            match self.fetch(location, Some(true))? {
+                Some(v) => self
+                    .parse_scene(&v, location)
+                    .source_for(picked, self.max_height)
+                    .map(|s| s.url.clone())
+                    .ok_or_else(|| {
+                        Error::NotFound(format!("no playable source in {}", redact(location)))
+                    })?,
+                None => location.to_string(),
+            }
+        };
+        Ok(Arc::new(self.client.open(&url)?))
+    }
+
     fn resolved_location(&self, location: &str) -> Result<String> {
         if !crate::is_source_location(location) {
             return Ok(location.into());
@@ -668,23 +690,25 @@ impl Source for FeedSource {
     }
 
     fn open(&self, location: &str) -> Result<Arc<dyn ByteSource>> {
-        let resolved = self.resolved_location(location)?;
-        let location = resolved.as_str();
-        let url = if is_direct_file(location) {
-            location.to_string()
-        } else {
-            match self.fetch(location, Some(true))? {
-                Some(v) => self
-                    .parse_scene(&v, location)
-                    .best_source(self.max_height)
-                    .map(|s| s.url.clone())
-                    .ok_or_else(|| {
-                        Error::NotFound(format!("no playable source in {}", redact(location)))
-                    })?,
-                None => location.to_string(),
+        self.open_picked(location, None)
+    }
+
+    fn open_file(&self, location: &str, height: u32) -> Result<Arc<dyn ByteSource>> {
+        self.open_picked(location, Some(height))
+    }
+
+    fn file_heights(&self, video: &Entry) -> Vec<u32> {
+        match self.resolved_location(&video.location) {
+            Ok(r) if !is_direct_file(&r) => {}
+            _ => return Vec::new(),
+        }
+        match self.scene(&video.location, true) {
+            Ok(s) => s.file_heights(),
+            Err(e) => {
+                log::warn!("files of {}: {e}", redact(&video.location));
+                Vec::new()
             }
-        };
-        Ok(Arc::new(self.client.open(&url)?))
+        }
     }
 
     fn transcode_targets(&self, video: &Entry) -> Vec<crate::TranscodeTarget> {
@@ -914,6 +938,37 @@ mod tests {
         ]}]});
         let s = deovr::parse_deovr_scene(&only, "https://vr/deovr/1");
         assert!(s.best_source(None).unwrap().is_transcode());
+    }
+
+    #[test]
+    fn a_file_picked_by_height_wins_over_the_max_height() {
+        let scene = json!({"title": "A", "media": [
+            {"name": "h265", "sources": [
+                {"resolution": 2880, "url": "https://vr/scene/1/2880-h265"},
+                {"resolution": 4096, "url": "https://vr/scene/1/4096"}
+            ]},
+            {"name": "h264", "sources": [
+                {"resolution": 2880, "url": "https://vr/scene/1/2880-h264"},
+                {"resolution": 1440, "url": "https://vr/scene/1/1440"}
+            ]},
+            {"name": "transcoding", "sources": [
+                {"resolution": 720, "url": "https://vr/scene/1/stream.mp4?resolution=STANDARD_HD"}
+            ]}
+        ]});
+        let s = heresphere::parse_heresphere_video(&scene, "https://vr/heresphere/1");
+        // One a height, tallest first, no transcodes.
+        assert_eq!(s.file_heights(), [4096, 2880, 1440]);
+        let url = |picked, max| s.source_for(picked, max).unwrap().url.as_str();
+        // No pick: the max height decides, as before.
+        assert_eq!(url(None, None), "https://vr/scene/1/4096");
+        assert_eq!(url(None, Some(2160)), "https://vr/scene/1/1440");
+        // A pick wins over it, above or below; the first listed of a height.
+        assert_eq!(url(Some(4096), Some(2160)), "https://vr/scene/1/4096");
+        assert_eq!(url(Some(1440), None), "https://vr/scene/1/1440");
+        assert_eq!(url(Some(2880), Some(1440)), "https://vr/scene/1/2880-h265");
+        // A height the scene no longer has, or a transcode's: as without.
+        assert_eq!(url(Some(2160), Some(2880)), "https://vr/scene/1/2880-h265");
+        assert_eq!(url(Some(720), None), "https://vr/scene/1/4096");
     }
 
     #[test]

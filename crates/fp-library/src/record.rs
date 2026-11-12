@@ -197,9 +197,9 @@ pub struct MediaRecord {
     pub tracks: PickedTracks,
 }
 
-/// The audio and subtitles picked for a video, which it plays with again
-/// when it opens (while they are still there). What wasn't picked follows
-/// the settings.
+/// The audio and subtitles picked for a video, and the file when a server
+/// offers it as several, which it plays with again when it opens (while
+/// they are still there). What wasn't picked follows the settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PickedTracks {
     /// The audio stream, by index.
@@ -207,6 +207,9 @@ pub struct PickedTracks {
     pub audio: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitles: Option<PickedSubtitles>,
+    /// The file, by its height: else the source's max height decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_height: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

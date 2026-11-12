@@ -185,6 +185,20 @@ pub trait Source: Send + Sync {
         Ok(())
     }
 
+    /// The heights `video` comes as files of, tallest first, when the
+    /// server offers it as several (a feed's scene): for picking one. May
+    /// ask the server, so not on the frame loop.
+    fn file_heights(&self, _video: &Entry) -> Vec<u32> {
+        Vec::new()
+    }
+
+    /// Opens `location`'s file `height` pixels tall (from
+    /// [`Source::file_heights`]); the one [`Source::open`] picks when it
+    /// has none.
+    fn open_file(&self, location: &str, _height: u32) -> Result<Arc<dyn ByteSource>> {
+        self.open(location)
+    }
+
     /// What the server can transcode `video` to, tallest first: for when
     /// the file itself can't play, or not smoothly. Nothing is encoded
     /// until one is opened. May ask the server, so not on the frame loop.

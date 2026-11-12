@@ -682,6 +682,9 @@ pub struct SourceForm {
     pub key_locked: Option<(String, Option<bool>)>,
     pub insecure_tls: bool,
     pub parallel_downloads: bool,
+    /// The tallest version to pick of a video a server has several of
+    /// (feeds, Jellyfin/Emby, Plex); `None` for any.
+    pub max_height: Option<u32>,
     /// Signing in to a Jellyfin/Emby server with Quick Connect rather than a
     /// password.
     pub use_quick_connect: bool,
@@ -725,6 +728,7 @@ impl Default for SourceForm {
             key_locked: None,
             insecure_tls: false,
             parallel_downloads: false,
+            max_height: None,
             use_quick_connect: true,
             quick_connect: QuickConnect::Idle,
             plex: plex::Connect::default(),

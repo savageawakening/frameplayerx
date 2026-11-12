@@ -594,6 +594,7 @@ impl App {
             video.screen_pose = place(player, 0.0, s.screen_distance, 0.0, 0.0);
             video.anchor = anchor_rot;
             video.settings = s;
+            video.scale = self.settings.autofocus_scale;
             if let Some(v) = p.player.info().video_stream() {
                 video.rotation = v.rotation;
                 video.pixel_aspect = v.pixel_aspect as f32;
@@ -976,7 +977,7 @@ fn autofocus(
     }
     // Measured and eased on the cameras' own baseline, so the distance is
     // the scene's; Scale changes only how it's drawn (`params::build`).
-    p.autofocus_scale = video.settings.scale;
+    p.autofocus_scale = video.scale;
     let baseline = af.tuning.sanitized().baseline;
     video.focus = af
         .advance(input.dt)

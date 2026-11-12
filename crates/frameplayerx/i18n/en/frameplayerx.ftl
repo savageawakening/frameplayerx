@@ -478,6 +478,8 @@ tracks-quality-file = The file
 tracks-quality-transcode = Transcoded live
 # Under a height the server can't start transcoding at a time.
 tracks-quality-no-seek = Live, can't skip
+# Under a height: one of the files the server has the video as.
+tracks-quality-file-height = File on the server
 # Under Automatic: the server is transcoding the file. $quality is like 1440p.
 tracks-quality-playing = Transcoding { $quality }
 haptics-stroke-bottom = Stroke bottom
@@ -616,6 +618,10 @@ source-self-signed-desc = For HTTPS servers on your own network.
 # A switch on a server's form, with the description below it.
 source-parallel-downloads = Parallel downloads
 source-parallel-downloads-desc = Downloads several parts of a video at once over separate connections, like a download manager. This helps if the server limits the speed of each connection. If it doesn't, it may gain nothing, and a server on hard drives can get slower.
+# A choice on a server's form: the tallest file or transcode to pick, with the description below it and the choice for no limit.
+source-max-height = Highest quality
+source-max-height-desc = The tallest version to pick when a video has several. A file picked in the player wins.
+source-max-height-any = Any
 source-passwords-note = Passwords are stored on this device only, in a file only you can read.
 quick-connect-code = Pairing code
 quick-connect-code-desc = Enter this code in your Jellyfin or Emby app under Quick Connect:

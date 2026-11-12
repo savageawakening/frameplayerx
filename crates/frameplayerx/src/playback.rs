@@ -58,6 +58,9 @@ pub enum Quality {
     Original,
     /// The server transcodes it to this [`TranscodeTarget::id`].
     Transcode(String),
+    /// The server's file this many pixels tall, of the several it offers
+    /// ([`fp_sources::Source::file_heights`]), whatever happens.
+    File(u32),
 }
 
 impl OpenRequest {
@@ -149,6 +152,9 @@ pub struct Playback {
     watch: Option<Watch>,
     /// What the server can transcode the video to, tallest first.
     pub targets: Vec<TranscodeTarget>,
+    /// The heights the server has the video as files of, tallest first,
+    /// when it has several.
+    pub files: Vec<u32>,
     /// What the server is transcoding it to; `None` for the file as it is.
     pub transcoding: Option<TranscodeTarget>,
     pub source_tracks: Vec<fp_sources::PlaybackTrack>,
@@ -542,6 +548,20 @@ pub fn open(
             src.transcode_targets(&video)
         })
         .unwrap_or_default();
+    let files = source
+        .as_ref()
+        .map(|src| {
+            let video = entry
+                .clone()
+                .unwrap_or_else(|| Entry::new(name.clone(), location.clone(), EntryKind::Video));
+            src.file_heights(&video)
+        })
+        .filter(|heights| heights.len() > 1)
+        .unwrap_or_default();
+    // The file picked for this video last time, while the server still has it.
+    if let Some(h) = saved_file(&req, &picked, &files) {
+        req.quality = Quality::File(h);
+    }
     // Frame sequential or not as the viewer last said, else by the labels.
     let frame_sequential = record
         .as_ref()
@@ -582,8 +602,12 @@ pub fn open(
             (p, pick, Some(t))
         }
         None => {
-            let src = match (&source, &source_session) {
-                (Some(src), Some(session)) => match src.open_playback(&location, session) {
+            let src = match (&source, &source_session, &req.quality) {
+                (Some(src), _, Quality::File(h)) => src
+                    .open_file(&location, *h)
+                    .map(Some)
+                    .map_err(|e| crate::ui::errors::source(&e)),
+                (Some(src), Some(session), _) => match src.open_playback(&location, session) {
                     Ok(bytes) => Ok(Some(bytes)),
                     Err(e)
                         if src.kind() == fp_sources::SourceKind::Plex
@@ -751,11 +775,24 @@ pub fn open(
             decode_check: (Instant::now(), 0, 0, 0),
             watch,
             targets,
+            files,
             transcoding,
             source_tracks,
         },
         scripts,
     })
+}
+
+/// The file to open `req` with, by its height: the one picked for the video
+/// last time, when nothing else is asked for and `files` still has it.
+fn saved_file(
+    req: &OpenRequest,
+    picked: &fp_library::PickedTracks,
+    files: &[u32],
+) -> Option<u32> {
+    (req.quality == Quality::Automatic && req.transcode.is_none())
+        .then_some(picked.file_height?)
+        .filter(|h| files.contains(h))
 }
 
 /// Asks `source` to transcode `location` to `t` from a time (seconds).
@@ -1524,6 +1561,28 @@ pub(crate) fn slow_decode_notice(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_file_picked_last_time_is_used_while_nothing_else_is_asked_for() {
+        let picked = fp_library::PickedTracks {
+            file_height: Some(2880),
+            ..Default::default()
+        };
+        let files = [4096, 2880, 1440];
+        let req = OpenRequest::default();
+        assert_eq!(saved_file(&req, &picked, &files), Some(2880));
+        // None picked, or the server no longer has it: the max height decides.
+        assert_eq!(saved_file(&req, &Default::default(), &files), None);
+        assert_eq!(saved_file(&req, &picked, &[4096, 1440]), None);
+        // Something else asked for, as when picking in the Quality list.
+        for quality in [Quality::Original, Quality::File(1440), Quality::Transcode("x".into())] {
+            let req = OpenRequest {
+                quality,
+                ..Default::default()
+            };
+            assert_eq!(saved_file(&req, &picked, &files), None);
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -2190,7 +2249,11 @@ mod tests {
             track("302", None, Some("plex://sub"), true),
         ];
         let saved =
-            |audio, subtitles| saved_source_tracks(&PickedTracks { audio, subtitles }, &tracks);
+            |audio, subtitles| saved_source_tracks(&PickedTracks {
+                audio,
+                subtitles,
+                ..Default::default()
+            }, &tracks);
         assert_eq!(saved(None, None), (None, None), "nothing picked");
         assert_eq!(
             saved(Some(2), Some(PickedSubtitles::Stream(3))),
@@ -2232,6 +2295,7 @@ mod tests {
             &PickedTracks {
                 audio: Some(2),
                 subtitles: Some(PickedSubtitles::Off),
+                ..Default::default()
             },
             &tracks,
         );

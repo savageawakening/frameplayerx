@@ -757,14 +757,19 @@ fn tracks_label(pb: &crate::playback::Playback, language: &str) -> Option<String
     let info = pb.player.info();
     let audio: Vec<_> = info.audio_streams().collect();
     let subtitles = crate::subtitles::rows(language, info, &pb.subtitle_files);
-    if audio.len() < 2 && subtitles.is_empty() && pb.targets.is_empty() {
+    if audio.len() < 2 && subtitles.is_empty() && pb.targets.is_empty() && pb.files.is_empty() {
         return None;
     }
     let mut label = String::new();
-    if !pb.targets.is_empty() {
+    if !pb.targets.is_empty() || !pb.files.is_empty() {
+        let file;
         let quality = match (&pb.transcoding, &pb.request.quality) {
             (Some(t), _) => t.label.as_str(),
             (None, Quality::Original) => tr!("tracks-quality-original"),
+            (None, Quality::File(h)) => {
+                file = format!("{h}p");
+                file.as_str()
+            }
             (None, _) => tr!("tracks-quality-automatic"),
         };
         label = format!("{}  {quality}      ", icons::GAUGE);
@@ -1166,7 +1171,9 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                                 pb.player.info().video_stream().map_or(0, |v| v.rotation);
                             fp_render::patch::measurable(&pb.format, rotation, f.layout)
                         });
-                        let autofocus = measurable.then_some(&mut v.settings.autofocus);
+                        let s = &mut *v.settings;
+                        let autofocus =
+                            measurable.then_some((&mut s.autofocus, &mut s.autofocus_scale));
                         stereo_tab(ui, &mut pb.settings, true, autofocus);
                     }
                     3 => picture_tab(ui, &mut pb.settings),
@@ -1564,30 +1571,31 @@ fn position_tab(
 
 /// Depth and eye alignment, with subtitle depth unless `subtitles` is off
 /// (Settings has it with the subtitles), and the autofocus switch when given
-/// (a video it can measure is open).
+/// (a video it can measure is open), with its Scale, one for every video.
 pub(super) fn stereo_tab(
     ui: &mut egui::Ui,
     s: &mut ViewSettings,
     subtitles: bool,
-    autofocus: Option<&mut bool>,
+    autofocus: Option<(&mut bool, &mut f32)>,
 ) {
     let d = ViewSettings::default();
     widgets::rows(ui, |r| {
-        let focusing = autofocus.as_deref().copied().unwrap_or(false);
-        if let Some(on) = autofocus {
+        let mut scale = None;
+        if let Some((on, k)) = autofocus {
             r.switch(
                 tr!("adjust-autofocus"),
                 Some(tr!("adjust-autofocus-desc")),
                 on,
             );
+            scale = on.then_some(k);
         }
         // While autofocus draws, the IPD offset is left out (see
         // `params::build`) and Scale takes its place; the offset is kept.
-        if focusing {
+        if let Some(k) = scale {
             r.ratio_slider(
                 tr!("adjust-scale"),
                 Some(tr!("adjust-scale-desc")),
-                &mut s.scale,
+                k,
                 fp_core::view::SCALE_RANGE,
             );
         } else {
@@ -1993,10 +2001,10 @@ pub fn tracks_panel(ctx: &egui::Context, v: &mut View) {
     let audio: Vec<_> = info.audio_streams().collect();
     let subtitles = crate::subtitles::rows(&v.settings.subtitle_language, info, &pb.subtitle_files);
     let label_h = ctx.fonts(|f| f.row_height(&theme::font(Weight::SemiBold, 13.0)));
-    let quality_rows = if pb.targets.is_empty() {
+    let quality_rows = if pb.targets.is_empty() && pb.files.is_empty() {
         0
     } else {
-        2 + pb.targets.len()
+        2 + pb.files.len() + pb.targets.len()
     };
     let rows = audio
         .len()
@@ -2124,8 +2132,9 @@ pub fn tracks_panel(ctx: &egui::Context, v: &mut View) {
         });
 }
 
-/// The Quality list: Automatic, Original, then the heights the server can
-/// transcode to. Picking one plays it from where the video is.
+/// The Quality list: Automatic, Original, the server's files when it has
+/// several, then the heights it can transcode to. Picking one plays it from
+/// where the video is.
 fn quality_list(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -2157,6 +2166,10 @@ fn quality_list(
             Quality::Automatic,
         );
         row(ui, tr!("tracks-quality-original"), "", Quality::Original);
+        for &h in &pb.files {
+            let title = format!("{h}p");
+            row(ui, &title, tr!("tracks-quality-file-height"), Quality::File(h));
+        }
         for t in &pb.targets {
             let detail = if t.seekable {
                 tr!("tracks-quality-transcode")

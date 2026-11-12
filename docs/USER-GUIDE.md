@@ -318,7 +318,12 @@ Relay must also be enabled on the server. It can work without opening a
 router port, but is limited to 2 Mbit/s and has the same remote-playback
 subscription requirements. With Relay, Automatic requests a lower bitrate
 transcode when the original exceeds the limit; you can also select a quality
-explicitly. Direct remote access needs a reachable server connection; port
+explicitly.
+
+**Highest quality**, on the form of a DeoVR, HereSphere, Jellyfin/Emby or
+Plex source, is the tallest version picked when a video has several (Any,
+2160p, 2880p, 3600p or 4096p), and the tallest transcode offered. A file
+picked in the player's Quality list wins over it for that video. Direct remote access needs a reachable server connection; port
 forwarding, a VPN or a reachable reverse proxy are possible ways to provide
 one. See Plex's
 [Relay documentation](https://support.plex.tv/articles/216766168-accessing-a-server-through-relay/)
@@ -623,8 +628,8 @@ While it's on, **Scale** takes the place of **Depth**: with autofocus on,
 it makes the scene look bigger or smaller, from 50% to 200% (100% is as
 filmed). What you look at stays where it is; everything grows or shrinks
 around your head, so at 200% a face a metre away looks like a giant's two
-metres away, and at 50% like a doll's half a metre away. It's kept for each
-video, as Depth is. Depth doesn't apply to what's near while autofocus is
+metres away, and at 50% like a doll's half a metre away. It's one setting
+for every video, kept from one to the next. Depth doesn't apply to what's near while autofocus is
 on, since autofocus already sets the distance of what you look at for where
 your eyes really are, and a depth offset would only pull it off that again;
 it comes back gradually as what you look at is farther, all of it by 100 m,
@@ -810,6 +815,11 @@ press it for the Quality list beside the audio tracks and subtitles:
   tallest height offered and says so on the control bar. It never changes
   the quality while a video plays.
 - **Original**: the file as it is, whatever happens.
+- A file on the server (**4096p**, **2880p**, …, *File on the server*),
+  when a DeoVR or HereSphere scene comes as several: that file, from where
+  you were. It's kept for the video, and picked again next time it opens;
+  **Automatic** or **Original** goes back to the source's **Highest
+  quality**.
 - A height (**2160p**, **1440p**, …): the server transcodes the file to at
   most that height, the width in proportion, from where you were.
 

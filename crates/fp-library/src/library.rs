@@ -1571,6 +1571,7 @@ mod tests {
         let tracks = PickedTracks {
             audio: Some(2),
             subtitles: Some(crate::PickedSubtitles::File("/v/a.ar.srt".into())),
+            ..Default::default()
         };
         lib.set_tracks(id, &tracks).unwrap();
 
@@ -1613,6 +1614,7 @@ mod tests {
         let off = PickedTracks {
             audio: None,
             subtitles: Some(crate::PickedSubtitles::Off),
+            ..Default::default()
         };
         lib.set_tracks(id, &off).unwrap();
         assert_eq!(lib.get(id).unwrap().unwrap().tracks, off);

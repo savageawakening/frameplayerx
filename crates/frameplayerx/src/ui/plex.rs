@@ -254,6 +254,7 @@ pub fn form(
             Some(tr!("source-parallel-downloads-desc")),
             &mut f.parallel_downloads,
         );
+        super::sources::max_height_row(r, &mut f.max_height);
         r.content(|ui| {
             widgets::section_label(ui, tr!("plex-connection-mode"));
             ui.add_enabled_ui(!matches!(f.plex.state, LinkState::Connecting), |ui| {
@@ -375,6 +376,7 @@ pub fn form(
         f.plex.connection.apply(&mut cfg);
         cfg.insecure_tls = f.insecure_tls;
         cfg.parallel_downloads = f.parallel_downloads;
+        cfg.max_height = f.max_height;
         if widgets::button(
             ui,
             Some(super::icons::CHECK),
@@ -439,6 +441,7 @@ fn manual_config(f: &SourceForm, id: String) -> PlexConfig {
     cfg.connections.clear();
     cfg.insecure_tls = f.insecure_tls;
     cfg.parallel_downloads = f.parallel_downloads;
+    cfg.max_height = f.max_height;
     f.plex.connection.apply(&mut cfg);
     cfg
 }

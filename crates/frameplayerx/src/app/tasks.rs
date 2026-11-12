@@ -775,7 +775,7 @@ impl App {
 
     /// Opens the video playing again from where it is, as `quality`.
     pub(super) fn play_quality(&mut self, quality: playback::Quality) {
-        let Some(p) = &self.playback else {
+        let Some(p) = &mut self.playback else {
             return;
         };
         let transcode = match &quality {
@@ -784,6 +784,19 @@ impl App {
         };
         if p.request.quality == quality && p.request.transcode == transcode {
             return;
+        }
+        // A file is kept for when this video next opens, as a track is;
+        // Automatic or Original leaves it to the source's max height again.
+        let file = match &quality {
+            playback::Quality::File(h) => Some(Some(*h)),
+            playback::Quality::Automatic | playback::Quality::Original => Some(None),
+            playback::Quality::Transcode(_) => None,
+        };
+        if let Some(file) = file
+            && p.picked.file_height != file
+        {
+            p.picked.file_height = file;
+            p.save_tracks(&self.services.library);
         }
         let req = OpenRequest {
             start_at: Some(p.player.position()),

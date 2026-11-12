@@ -217,6 +217,7 @@ mod tests {
                 &PickedTracks {
                     audio: Some(2),
                     subtitles: Some(PickedSubtitles::File(format!("{OLD}movie.srt"))),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -395,6 +396,7 @@ mod tests {
                 &PickedTracks {
                     audio: Some(1),
                     subtitles: Some(PickedSubtitles::File(format!("{OLD}a.srt"))),
+                    ..Default::default()
                 },
             )
             .unwrap();

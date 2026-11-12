@@ -935,6 +935,9 @@ fn server_form(
                     Some(tr!("source-parallel-downloads-desc")),
                     &mut f.parallel_downloads,
                 );
+                if picks_height(f.kind) {
+                    max_height_row(r, &mut f.max_height);
+                }
             }
         }
     });
@@ -1171,6 +1174,7 @@ pub fn edit_form(cfg: &SourceConfig) -> SourceForm {
             f.address = c.url.clone();
             f.insecure_tls = c.insecure_tls;
             f.parallel_downloads = c.parallel_downloads;
+            f.max_height = c.max_height;
             f.plex.manual = c.auth.is_none();
             f.plex.token = c.access_token.clone();
             f.plex.connection = super::plex::ConnectionMode::from_config(c);
@@ -1182,6 +1186,7 @@ pub fn edit_form(cfg: &SourceConfig) -> SourceForm {
             f.address = c.url.clone();
             f.insecure_tls = c.insecure_tls;
             f.parallel_downloads = c.parallel_downloads;
+            f.max_height = c.max_height;
         }
         SourceConfig::Smb(c) => {
             creds(&c.credentials);
@@ -1202,6 +1207,7 @@ pub fn edit_form(cfg: &SourceConfig) -> SourceForm {
             f.address = c.url.clone();
             f.insecure_tls = c.insecure_tls;
             f.parallel_downloads = c.parallel_downloads;
+            f.max_height = c.max_height;
             // Signed in with Quick Connect: kept until cleared.
             if c.credentials.is_none() {
                 f.use_quick_connect = true;
@@ -1226,14 +1232,46 @@ fn library_address(c: &fp_sources::LibraryConfig) -> String {
     }
 }
 
+/// The tallest versions a source can be kept to, and no limit.
+const MAX_HEIGHTS: [Option<u32>; 5] = [None, Some(2160), Some(2880), Some(3600), Some(4096)];
+
+/// Whether a kind of source picks among versions of a video by height.
+fn picks_height(kind: SourceKind) -> bool {
+    matches!(
+        kind,
+        SourceKind::DeoVr | SourceKind::HereSphere | SourceKind::MediaBrowser | SourceKind::Plex
+    )
+}
+
+/// The source's highest quality: Any, or a height. One saved that isn't
+/// offered shows as itself, picked, until another is.
+pub(super) fn max_height_row(r: &mut widgets::Rows, max_height: &mut Option<u32>) {
+    r.row(
+        tr!("source-max-height"),
+        Some(tr!("source-max-height-desc")),
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let mut shown = MAX_HEIGHTS.to_vec();
+                if !shown.contains(max_height) {
+                    shown.push(*max_height);
+                }
+                for h in shown {
+                    let label = match h {
+                        Some(h) => format!("{h}p"),
+                        None => tr!("source-max-height-any").to_string(),
+                    };
+                    if widgets::chip(ui, &label, *max_height == h).clicked() {
+                        *max_height = h;
+                    }
+                }
+            });
+        },
+    );
+}
+
 /// What the form doesn't show, kept from the source being edited.
 fn keep_hidden(mut new: SourceConfig, old: &SourceConfig) -> SourceConfig {
     match (&mut new, old) {
-        (SourceConfig::DeoVr(n), SourceConfig::DeoVr(o))
-        | (SourceConfig::HereSphere(n), SourceConfig::HereSphere(o)) => n.max_height = o.max_height,
-        (SourceConfig::MediaBrowser(n), SourceConfig::MediaBrowser(o)) => {
-            n.max_height = o.max_height;
-        }
         // The same server keeps the key trusted for it.
         (SourceConfig::Sftp(n), SourceConfig::Sftp(o))
             if n.host.eq_ignore_ascii_case(&o.host)
@@ -1387,7 +1425,7 @@ pub fn build_config(f: &SourceForm, id: String) -> Result<SourceConfig, String> 
                 credentials,
                 insecure_tls: f.insecure_tls,
                 parallel_downloads: f.parallel_downloads,
-                max_height: None,
+                max_height: f.max_height,
             };
             if f.kind == SourceKind::DeoVr {
                 SourceConfig::DeoVr(c)
@@ -1494,7 +1532,7 @@ pub fn build_config(f: &SourceForm, id: String) -> Result<SourceConfig, String> 
                 credentials,
                 insecure_tls: f.insecure_tls,
                 parallel_downloads: f.parallel_downloads,
-                max_height: None,
+                max_height: f.max_height,
                 access_token,
                 user_id,
             })
@@ -1807,5 +1845,22 @@ mod tests {
             let back = build_config(&f, c.id().into()).map(|n| keep_hidden(n, &c));
             assert_eq!(back.as_ref(), Ok(&c), "{c:?}");
         }
+    }
+
+    #[test]
+    fn the_highest_quality_picked_on_the_form_is_saved() {
+        let mut f = SourceForm {
+            kind: SourceKind::HereSphere,
+            address: "https://vr.example/heresphere".into(),
+            ..SourceForm::default()
+        };
+        for h in MAX_HEIGHTS {
+            f.max_height = h;
+            match build_config(&f, "h".into()) {
+                Ok(SourceConfig::HereSphere(c)) => assert_eq!(c.max_height, h),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(picks_height(SourceKind::HereSphere) && !picks_height(SourceKind::Smb));
     }
 }

@@ -94,6 +94,10 @@ pub struct VideoParams {
     /// Autofocus: how far away the picture is taken to be, for a 180°/360°
     /// video. `None` draws it as it always has been.
     pub focus: Option<Focus>,
+    /// While autofocus draws: how big the scene looks, 1.0 as filmed, from
+    /// [`fp_core::view::SCALE_RANGE`]. It takes the IPD offset's place then
+    /// and does nothing otherwise.
+    pub scale: f32,
     /// Epipolar measuring: a patch to draw this frame, read back with
     /// [`crate::Renderer::patch_result`].
     pub patch: Option<crate::patch::PatchAsk>,
@@ -132,6 +136,7 @@ impl Default for VideoParams {
             rotation: 0,
             pixel_aspect: 1.0,
             focus: None,
+            scale: 1.0,
             patch: None,
         }
     }
@@ -280,7 +285,7 @@ pub(crate) fn build(
     // Scale makes the scene k times its size about the viewer's head: the
     // cameras k times as far apart and the sphere k times as big, so what
     // the eyes are on stays where they look and its vergence is 1/k.
-    let k = scale_of(s);
+    let k = scale_of(video.scale);
     let focus = match video.focus {
         Some(f) if kind != 0 && f.distance.is_finite() && f.baseline.is_finite() => Vec4::new(
             f.distance.clamp(MIN_FOCUS_DISTANCE, MAX_FOCUS_DISTANCE) * k,
@@ -357,11 +362,11 @@ fn ipd_share(distance: f32) -> f32 {
     ((near - 1.0 / distance) / (near - far)).clamp(0.0, 1.0)
 }
 
-/// The scene's scale while autofocus draws ([`ViewSettings::scale`]), kept
+/// The scene's scale while autofocus draws ([`VideoParams::scale`]), kept
 /// to its range; an unusable value is 1.
-fn scale_of(s: &ViewSettings) -> f32 {
-    if s.scale.is_finite() {
-        s.scale.clamp(
+fn scale_of(scale: f32) -> f32 {
+    if scale.is_finite() {
+        scale.clamp(
             *fp_core::view::SCALE_RANGE.start(),
             *fp_core::view::SCALE_RANGE.end(),
         )
@@ -673,10 +678,7 @@ mod tests {
         for k in [0.5f32, 1.0, 1.6, 2.0] {
             let video = VideoParams {
                 format: VideoFormat::new(Projection::EQUIRECT_180, StereoLayout::SideBySide),
-                settings: ViewSettings {
-                    scale: k,
-                    ..Default::default()
-                },
+                scale: k,
                 anchor,
                 focus: Some(Focus { distance, baseline }),
                 ..Default::default()
@@ -723,20 +725,14 @@ mod tests {
         // Without autofocus, scale does nothing.
         let off = VideoParams {
             format: VideoFormat::new(Projection::EQUIRECT_180, StereoLayout::SideBySide),
-            settings: ViewSettings {
-                scale: 2.0,
-                ..Default::default()
-            },
+            scale: 2.0,
             ..Default::default()
         };
         assert_eq!(build(&off, None, [Mat4::IDENTITY; 2]).focus, Vec4::ZERO);
         assert_eq!(
             build(&off, None, [Mat4::IDENTITY; 2]).proj,
             build(
-                &VideoParams {
-                    settings: ViewSettings::default(),
-                    ..off
-                },
+                &VideoParams { scale: 1.0, ..off },
                 None,
                 [Mat4::IDENTITY; 2]
             )
