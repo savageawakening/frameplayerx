@@ -118,6 +118,11 @@ pub struct Settings {
     /// it's seen where it was whatever the viewer's IPD
     /// ([`fp_core::autofocus`]).
     pub autofocus: bool,
+    /// The gaze calibration autofocus applies. Saved where the
+    /// measuring's tuning was, so a fit saved with it is kept; the tuning
+    /// saved beside it is no longer read.
+    #[serde(rename = "autofocus_epipolar")]
+    pub autofocus_gaze: GazeCalibration,
     /// While autofocus draws: how big the scene looks, 1.0 as filmed
     /// ([`fp_core::view::SCALE_RANGE`]). One for every video.
     pub autofocus_scale: f32,
@@ -271,6 +276,7 @@ impl Default for Settings {
             autoplay: false,
             loop_playlist: false,
             autofocus: false,
+            autofocus_gaze: Default::default(),
             autofocus_scale: 1.0,
             perf_overlay: false,
             controls: crate::bindings::Bindings::default(),
@@ -353,9 +359,59 @@ impl Settings {
     }
 }
 
+/// Gaze calibration, the correction autofocus applies to where the
+/// eyes are said to look while there is one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GazeCalibration {
+    pub gaze_fit: Option<fp_core::gaze_fit::GazeFit>,
+    /// Asked for from the Stereo tab: 1 calibrate the gaze, 2 check it.
+    #[serde(skip)]
+    pub calibrate: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_saved_with_the_old_gaze_trim_still_load() {
+        let saved = r#"{
+            "autofocus_epipolar": {"gaze_bias": true, "bias": [1.5, -2.0], "candidates": 200}
+        }"#;
+        let s: Settings = serde_json::from_str(saved).expect("loads");
+        assert_eq!(s.autofocus_gaze.gaze_fit, None);
+    }
+
+    #[test]
+    fn a_calibration_saved_with_the_old_tuning_is_kept_and_the_tuning_is_not() {
+        let saved = r#"{
+            "autofocus_epipolar": {"candidates": 64, "fine_pass": true, "agreement": "strict",
+                "smooth_gaze": false, "gaze_fit": {"offset": [1.5, -0.5], "rms": 0.4}},
+            "autofocus_tuning": {"rate": 7.0},
+            "autofocus_show_distance": true
+        }"#;
+        let s: Settings = serde_json::from_str(saved).expect("loads");
+        let fit = s.autofocus_gaze.gaze_fit.expect("kept");
+        assert_eq!((fit.offset, fit.rms), ([1.5, -0.5], 0.4));
+        // Saved again, only the calibration is there.
+        let again = serde_json::to_value(&s).unwrap();
+        let gaze = &again["autofocus_epipolar"];
+        assert!(gaze.get("gaze_fit").is_some() && gaze.get("candidates").is_none());
+        assert!(again.get("autofocus_tuning").is_none());
+    }
+
+    #[test]
+    fn settings_saved_with_the_old_measuring_choices_still_load() {
+        let saved = r#"{
+            "autofocus": true,
+            "autofocus_measuring": "ours",
+            "autofocus_compare": true,
+            "autofocus_tuning": {"method": "gradient", "prefilter": true, "rate": 7.0}
+        }"#;
+        let s: Settings = serde_json::from_str(saved).expect("loads");
+        assert!(s.autofocus);
+    }
 
     #[test]
     fn presets_get_free_names_and_next_goes_round() {

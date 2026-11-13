@@ -3,6 +3,7 @@
 
 mod actions;
 mod frame;
+mod gaze_calibration;
 mod input;
 mod plex;
 mod remote;
@@ -109,6 +110,9 @@ const BAR_PX: [u32; 2] = [1400, 268];
 const BAR_M_PER_PX: f32 = 1.2 / 1400.0;
 /// The performance overlay's quad layer (the panels' are their indices).
 const PERF_LAYER: u64 = 8;
+/// Gaze calibration's target and check dot's quad layers.
+const GAZE_TARGET_LAYER: u64 = 11;
+const GAZE_DOT_LAYER: u64 = 12;
 /// The performance overlay's place when routing input: after the panels that
 /// take it, which the toast doesn't.
 const PERF: usize = TOAST;
@@ -148,6 +152,10 @@ pub struct App {
     perf: Panel,
     /// The eyes are on a panel this frame, rather than the picture.
     gaze_on_ui: bool,
+    /// Gaze calibration, while it runs, and its target and check dot.
+    calibrating: Option<gaze_calibration::Calibrating>,
+    gaze_target: Panel,
+    gaze_dot: Panel,
     perf_monitor: Option<crate::perf::Monitor>,
     perf_readings: Option<crate::perf::Readings>,
     perf_shown: ui::perf::Overlay,
@@ -276,6 +284,7 @@ impl App {
         panels[MAIN].refresh = Some(Duration::from_millis(1000));
         let subs = panel([1600, 320], 1.6, 1.0);
         let perf = perf_panel();
+        let (gaze_target, gaze_dot) = gaze_calibration::panels();
         subs.ctx
             .style_mut(|s| s.visuals.panel_fill = egui::Color32::TRANSPARENT);
         let sub_fonts = Jobs::new();
@@ -292,6 +301,9 @@ impl App {
             subs,
             perf,
             gaze_on_ui: false,
+            calibrating: None,
+            gaze_target,
+            gaze_dot,
             perf_monitor: None,
             perf_readings: None,
             perf_shown: Default::default(),

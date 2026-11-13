@@ -108,8 +108,10 @@ pub struct Playback {
     /// Whether the last frame seen could be measured: kept while a frame is
     /// missing for a moment, so that a stall doesn't switch it off and on.
     pub autofocus_measurable: bool,
-    /// Autofocus's measuring, its matching thread, frames since a patch was
-    /// asked for without coming back, and the gaze, smoothed.
+    /// The distance drawn at last: autofocus is off once it reaches `None`.
+    pub autofocus_drawn: Option<f32>,
+    /// Autofocus's measuring, its matching thread, and frames since a patch
+    /// was asked for without coming back.
     pub epipolar: fp_core::epipolar::Epipolar,
     pub epipolar_worker: Option<fp_core::epipolar::Worker>,
     pub epipolar_waiting: u32,
@@ -755,6 +757,7 @@ pub fn open(
             autofocus: Autofocus::default(),
             autofocus_at: None,
             autofocus_measurable: false,
+            autofocus_drawn: None,
             epipolar: Default::default(),
             epipolar_worker: fp_core::epipolar::Worker::start(),
             epipolar_waiting: 0,

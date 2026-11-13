@@ -18,6 +18,7 @@ pub mod dirs;
 pub mod display;
 pub mod epipolar;
 pub mod format;
+pub mod gaze_fit;
 pub mod language;
 pub mod playback;
 pub mod shuffle;

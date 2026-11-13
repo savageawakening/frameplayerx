@@ -1172,8 +1172,11 @@ pub fn adjust_panel(ctx: &egui::Context, v: &mut View) {
                             fp_render::patch::measurable(&pb.format, rotation, f.layout)
                         });
                         let s = &mut *v.settings;
-                        let autofocus =
-                            measurable.then_some((&mut s.autofocus, &mut s.autofocus_scale));
+                        let autofocus = measurable.then_some((
+                            &mut s.autofocus,
+                            &mut s.autofocus_scale,
+                            &mut s.autofocus_gaze,
+                        ));
                         stereo_tab(ui, &mut pb.settings, true, autofocus);
                     }
                     3 => picture_tab(ui, &mut pb.settings),
@@ -1569,6 +1572,14 @@ fn position_tab(
     background_controls(ui, &mut s.background);
 }
 
+/// The autofocus switch, its Scale and, while trying it out, its gaze
+/// calibration.
+type AutofocusRows<'a> = (
+    &'a mut bool,
+    &'a mut f32,
+    &'a mut crate::settings::GazeCalibration,
+);
+
 /// Depth and eye alignment, with subtitle depth unless `subtitles` is off
 /// (Settings has it with the subtitles), and the autofocus switch when given
 /// (a video it can measure is open), with its Scale, one for every video.
@@ -1576,18 +1587,22 @@ pub(super) fn stereo_tab(
     ui: &mut egui::Ui,
     s: &mut ViewSettings,
     subtitles: bool,
-    autofocus: Option<(&mut bool, &mut f32)>,
+    autofocus: Option<AutofocusRows<'_>>,
 ) {
     let d = ViewSettings::default();
     widgets::rows(ui, |r| {
         let mut scale = None;
-        if let Some((on, k)) = autofocus {
+        let mut calibration = None;
+        if let Some((on, k, gaze)) = autofocus {
             r.switch(
                 tr!("adjust-autofocus"),
                 Some(tr!("adjust-autofocus-desc")),
                 on,
             );
-            scale = on.then_some(k);
+            if *on {
+                scale = Some(k);
+                calibration = Some(gaze);
+            }
         }
         // While autofocus draws, the IPD offset is left out (see
         // `params::build`) and Scale takes its place; the offset is kept.
@@ -1598,6 +1613,9 @@ pub(super) fn stereo_tab(
                 k,
                 fp_core::view::SCALE_RANGE,
             );
+            if let Some(c) = calibration {
+                super::gaze_calibration::calibration_rows(r, c);
+            }
         } else {
             r.slider(
                 tr!("adjust-depth"),

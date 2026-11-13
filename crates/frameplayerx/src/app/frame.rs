@@ -161,7 +161,22 @@ impl App {
             }
             _ => false,
         };
-        let (frame, video, passthrough) = self.video(renderer, &input, anchor);
+        // Gaze calibration: autofocus waits, the picture dims, and nothing but
+        // its targets shows.
+        let calibrating = self.gaze_calibration(renderer, &input);
+        if calibrating {
+            self.gaze_on_ui = true;
+        }
+        let (mut frame, mut video, mut passthrough) = self.video(renderer, &input, anchor);
+        if calibrating {
+            // No picture at all: only the targets, at their own depth.
+            frame = None;
+            passthrough = false;
+            video.background = gaze_calibration::BACKGROUND;
+            for p in self.panels.iter_mut().chain([&mut self.perf]) {
+                p.visible = false;
+            }
+        }
         let (quads, layers) = self.compose(&input, eye);
         FrameOutput {
             frame,
@@ -603,6 +618,7 @@ impl App {
                 p,
                 self.gaze_on_ui,
                 self.settings.autofocus,
+                self.settings.autofocus_gaze.gaze_fit,
                 frame.as_ref(),
                 &mut video,
                 input,
@@ -653,7 +669,11 @@ impl App {
                 quads.push(q);
             }
         }
-        for p in self.panels.iter_mut().chain([&mut self.perf]) {
+        for p in self.panels.iter_mut().chain([
+            &mut self.perf,
+            &mut self.gaze_target,
+            &mut self.gaze_dot,
+        ]) {
             p.update_fade(input.dt);
         }
         let mut order: Vec<(u64, &Panel)> = self
@@ -661,7 +681,11 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, p)| (i as u64, p))
-            .chain([(PERF_LAYER, &self.perf)])
+            .chain([
+                (PERF_LAYER, &self.perf),
+                (GAZE_TARGET_LAYER, &self.gaze_target),
+                (GAZE_DOT_LAYER, &self.gaze_dot),
+            ])
             .filter(|(_, p)| p.shown())
             .collect();
         let distance = |p: &Panel| (p.pose.w_axis.truncate() - eye).length();
@@ -841,10 +865,12 @@ fn perf_video(
 /// the picture at the distance it has eased to. Turned off, or for a video it
 /// can't measure, it eases out to where the picture is drawn as without it.
 /// With the eyes on a panel, nothing is measured and the focus holds.
+#[allow(clippy::too_many_arguments)]
 fn autofocus(
     p: &mut Playback,
     on_ui: bool,
     on: bool,
+    gaze_fit: Option<fp_core::gaze_fit::GazeFit>,
     frame: Option<&Arc<VideoFrame>>,
     video: &mut VideoParams,
     input: &FrameInput,
@@ -870,10 +896,12 @@ fn autofocus(
         // gently as it moves anywhere; then nothing more to do.
         af.release();
         let baseline = af.tuning.sanitized().baseline;
-        video.focus = af
-            .advance(input.dt)
+        let was = p.autofocus_drawn;
+        p.autofocus_drawn = af.advance(input.dt);
+        video.focus = p
+            .autofocus_drawn
             .map(|distance| fp_render::Focus { distance, baseline });
-        if video.focus.is_none() {
+        if was.is_some() && p.autofocus_drawn.is_none() {
             af.off();
         }
         return;
@@ -888,17 +916,25 @@ fn autofocus(
         }
         p.autofocus_at = Some(f.pts);
     }
-    // Settling goes by the gaze as tracked, where a saccade is quick; the
+    // The gaze as measured along: corrected first, as calibration fitted it
+    // on the raw gaze, then smoothed.
+    let mut gaze = input.gaze;
+    if let (Some(fit), Some(g), Some((_, rot))) = (gaze_fit, gaze, input.head) {
+        let local = fit.correct((rot.inverse() * g).to_array());
+        gaze = Some(rot * Vec3::from_array(local));
+    }
+    // Settling goes by this, as tracked, where a saccade is quick; the
     // measuring aims along it smoothed while it rests.
-    let gaze = p
+    let tracked = gaze;
+    gaze = p
         .gaze_filter
-        .take(input.gaze.map(|g| g.to_array()), input.dt)
+        .take(gaze.map(|g| g.to_array()), input.dt)
         .map(Vec3::from_array);
     let settled = if on_ui {
         af.on_ui(input.dt);
         false
     } else {
-        af.look(input.gaze.map(|g| g.to_array()), input.dt)
+        af.look(tracked.map(|g| g.to_array()), input.dt)
     };
     p.epipolar.set_focus(af.focus_angle());
     if !settled {
@@ -979,8 +1015,9 @@ fn autofocus(
     // the scene's; Scale changes only how it's drawn (`params::build`).
     p.autofocus_scale = video.scale;
     let baseline = af.tuning.sanitized().baseline;
-    video.focus = af
-        .advance(input.dt)
+    p.autofocus_drawn = af.advance(input.dt);
+    video.focus = p
+        .autofocus_drawn
         .map(|distance| fp_render::Focus { distance, baseline });
 }
 

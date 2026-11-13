@@ -419,6 +419,16 @@ adjust-depth = Depth
 adjust-depth-desc = Eye separation; lower if it's hard to fuse.
 adjust-scale = Scale
 adjust-scale-desc = Makes the scene look bigger or smaller, with autofocus on.
+# Under Scale, with autofocus on. Chips: look at each target in turn, then
+# look at targets again with a dot where your eyes are said to be, or drop
+# the calibration.
+adjust-gaze-calibrate = Calibrate gaze
+adjust-gaze-check = Check
+adjust-gaze-forget = Forget
+# Degrees the eye tracker was off, at the middle, and what's left over.
+adjust-gaze-calibrated = Calibrated: { $right }° right, { $up }° up at the middle; { $left }° left over
+adjust-gaze-calibrate-again = Calibrated: { $right }° right, { $up }° up at the middle; { $left }° left over. Worth calibrating again.
+adjust-gaze-uncalibrated = Calibrate gaze for best results
 adjust-vertical-align = Vertical align
 adjust-rotation-align = Rotation align
 adjust-swap-eyes = Swap eyes
