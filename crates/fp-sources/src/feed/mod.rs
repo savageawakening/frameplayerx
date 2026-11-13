@@ -55,6 +55,12 @@ const LINKS_FRESH: Duration = Duration::from_secs(60);
 /// Parallel requests when a HereSphere group is listed.
 const DETAIL_WORKERS: usize = 6;
 
+/// The `User-Agent` HereSphere 0.8 sends with its API requests. Some
+/// commercial sites answer their HereSphere API only to a client that names
+/// itself HereSphere (`Vary: User-Agent`) and redirect everything else to a
+/// setup page, so HereSphere API sources send it.
+const HERESPHERE_USER_AGENT: &str = "HereSphere/0.8";
+
 // ---- fields both formats use ----
 
 fn url_field(v: &Value, key: &str, base: &str) -> Option<String> {
@@ -214,6 +220,21 @@ pub struct FeedSource {
     /// Held while asking the feed for a scene's address, so workers filling
     /// in details don't all download it at once.
     resolving: Mutex<()>,
+    /// The HereSphere sign-in (`<library>/auth`) of a source with a login.
+    sign_in: Mutex<SignIn>,
+}
+
+/// What a HereSphere server answered to the sign-in at `<library>/auth`.
+#[derive(Clone, Default)]
+enum SignIn {
+    /// Not asked yet, or the token was refused and must be asked again.
+    #[default]
+    Unknown,
+    /// The `auth-token` it gave, sent with every request to the server.
+    Token(String),
+    /// No sign-in there (no such address, or no token in the answer): the
+    /// login goes in each request's body only, as before.
+    Unsupported,
 }
 
 #[derive(Default)]
@@ -256,10 +277,16 @@ impl FeedSource {
             ));
         }
         let (url, creds) = clean_url_and_credentials(&config.url, config.credentials.as_ref())?;
+        let defaults = HttpOptions::default();
+        let user_agent = match protocol {
+            Protocol::HereSphere => HERESPHERE_USER_AGENT.to_string(),
+            Protocol::DeoVr => defaults.user_agent.clone(),
+        };
         let opts = HttpOptions {
             insecure_tls: config.insecure_tls,
             cache: crate::cache::CacheOptions::for_downloads(config.parallel_downloads),
-            ..HttpOptions::default()
+            user_agent,
+            ..defaults
         };
         Ok(FeedSource {
             protocol,
@@ -272,6 +299,7 @@ impl FeedSource {
             event_servers: Mutex::new(HashMap::new()),
             scene_links: Mutex::new(SceneLinks::default()),
             resolving: Mutex::new(()),
+            sign_in: Mutex::new(SignIn::Unknown),
         })
     }
 
@@ -367,9 +395,10 @@ impl FeedSource {
                         url,
                         Some("application/x-www-form-urlencoded"),
                         Some(form.as_bytes()),
+                        None,
                     )
                 }
-                None => self.json("GET", url, None, None),
+                None => self.json("GET", url, None, None, None),
             },
             Protocol::HereSphere => {
                 let mut body = self.heresphere_body(url);
@@ -377,9 +406,97 @@ impl FeedSource {
                     body.insert("needsMediaSource".into(), Value::Bool(m));
                 }
                 let bytes = serde_json::to_vec(&Value::Object(body))?;
-                self.json("POST", url, Some("application/json"), Some(&bytes))
+                self.heresphere_post(url, &bytes)
             }
         }
+    }
+
+    /// A HereSphere `POST` to `url`, with the sign-in's `auth-token` when the
+    /// source has a login. A refused token (HTTP 401/403, or `"access": -1`)
+    /// is replaced by signing in again, once.
+    fn heresphere_post(&self, url: &str, body: &[u8]) -> Result<Option<Value>> {
+        let token = self.auth_token(url)?;
+        let first = self.json(
+            "POST",
+            url,
+            Some("application/json"),
+            Some(body),
+            token.as_deref(),
+        );
+        let refused = match &first {
+            Err(Error::Auth(_)) => true,
+            Ok(Some(v)) => num(v, "access").is_some_and(|a| a < 0.0),
+            _ => false,
+        };
+        if token.is_none() || !refused {
+            return first;
+        }
+        log::info!(
+            "{}: the HereSphere sign-in expired; signing in again",
+            self.name
+        );
+        *lock(&self.sign_in) = SignIn::Unknown;
+        let token = self.auth_token(url)?;
+        self.json(
+            "POST",
+            url,
+            Some("application/json"),
+            Some(body),
+            token.as_deref(),
+        )
+    }
+
+    /// The `auth-token` for a request to `url`: `None` without a login, for
+    /// another server, or when the server has no HereSphere sign-in. Signs
+    /// in at `<library>/auth` the first time, as HereSphere does.
+    fn auth_token(&self, url: &str) -> Result<Option<String>> {
+        let Some(creds) = self.creds_for(url) else {
+            return Ok(None);
+        };
+        // Held while signing in, so parallel requests sign in only once.
+        let mut state = lock(&self.sign_in);
+        match &*state {
+            SignIn::Token(token) => return Ok(Some(token.clone())),
+            SignIn::Unsupported => return Ok(None),
+            SignIn::Unknown => {}
+        }
+        let auth = heresphere::auth_url(&self.url);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "username": creds.username,
+            "password": creds.password,
+        }))?;
+        let reply = match self.json("POST", &auth, Some("application/json"), Some(&body), None) {
+            Ok(reply) => reply,
+            // The login refused (HTTP 401/403), or the server couldn't be
+            // reached: asked again next time.
+            Err(e @ (Error::Auth(_) | Error::Http { .. } | Error::Io(_))) => return Err(e),
+            // Anything else is a server without HereSphere's sign-in: no
+            // such address, or one it takes for something else (XBVR reads
+            // `auth` as a scene ID and answers with an empty body). The
+            // login stays in each request's body, as before.
+            Err(e) => {
+                log::debug!("{}: no sign-in at {}: {e}", self.name, redact(&auth));
+                None
+            }
+        };
+        let token = match reply {
+            Some(v) if num(&v, "access").is_some_and(|a| a < 0.0) => {
+                return Err(Error::Auth(redact(&self.url)));
+            }
+            Some(v) => text(&v, "auth-token").filter(|t| !t.is_empty()),
+            None => None,
+        };
+        *state = match &token {
+            Some(t) => {
+                log::info!("{}: signed in to the HereSphere API", self.name);
+                SignIn::Token(t.clone())
+            }
+            None => {
+                log::info!("{}: no HereSphere sign-in at {}", self.name, redact(&auth));
+                SignIn::Unsupported
+            }
+        };
+        Ok(token)
     }
 
     /// The login, for the feed's own server only: a document it links to
@@ -414,10 +531,17 @@ impl FeedSource {
         url: &str,
         content_type: Option<&str>,
         body: Option<&[u8]>,
+        auth_token: Option<&str>,
     ) -> Result<Option<Value>> {
         let mut headers = vec![("Accept", "application/json")];
         if let Some(ct) = content_type {
             headers.push(("Content-Type", ct));
+        }
+        if self.protocol == Protocol::HereSphere {
+            headers.push(("HereSphere-JSON-Version", "1"));
+        }
+        if let Some(token) = auth_token {
+            headers.push(("auth-token", token));
         }
         let (reply, read) =
             self.client
@@ -610,7 +734,7 @@ impl SceneFeed for FeedSource {
         body.insert("isFavorite".into(), Value::Bool(favorite));
         body.insert("needsMediaSource".into(), Value::Bool(false));
         let bytes = serde_json::to_vec(&Value::Object(body))?;
-        self.json("POST", url, Some("application/json"), Some(&bytes))?;
+        self.heresphere_post(url, &bytes)?;
         Ok(())
     }
 
